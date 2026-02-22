@@ -232,6 +232,7 @@ def _evaluate_ukcat_ovr_rows(
     test_df: pd.DataFrame,
     fields: Sequence[str],
     threshold: float,
+    top_k_fallback: int,
     n_jobs: int,
     ngram_max: int,
     clean_text: bool,
@@ -248,7 +249,13 @@ def _evaluate_ukcat_ovr_rows(
     model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
     model.fit(x_train, y_train)
 
-    pred_codes, _ = _predict_codes(model, mlb, x_test, threshold=threshold)
+    pred_codes, _ = _predict_codes(
+        model,
+        mlb,
+        x_test,
+        threshold=threshold,
+        top_k_fallback=top_k_fallback,
+    )
 
     return pd.DataFrame(
         {
@@ -355,6 +362,13 @@ def _format_compare_metric(value: float, metric_name: str) -> str:
     help="Probability threshold used by the OvR approach in compare mode",
 )
 @click.option(
+    "--top-k-fallback",
+    default=0,
+    type=int,
+    show_default=True,
+    help="If no labels pass threshold, assign the top-k labels in compare-mode OvR",
+)
+@click.option(
     "--n-jobs",
     default=1,
     type=int,
@@ -401,6 +415,7 @@ def evaluate_ukcat(
     random_state: int,
     test_size: float,
     threshold: float,
+    top_k_fallback: int,
     n_jobs: int,
     ngram_max: int,
     fields: Sequence[str],
@@ -427,6 +442,8 @@ def evaluate_ukcat(
         raise click.ClickException("--test-size must be between 0 and 1")
     if not 0 <= threshold <= 1:
         raise click.ClickException("--threshold must be between 0 and 1")
+    if top_k_fallback < 0:
+        raise click.ClickException("--top-k-fallback must be 0 or greater")
     if n_jobs < 1:
         raise click.ClickException("--n-jobs must be at least 1")
     if ngram_max < 1:
@@ -455,6 +472,7 @@ def evaluate_ukcat(
             test_df=test_df,
             fields=fields,
             threshold=threshold,
+            top_k_fallback=top_k_fallback,
             n_jobs=n_jobs,
             ngram_max=ngram_max,
             clean_text=clean_text,

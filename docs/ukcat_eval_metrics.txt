@@ -1,0 +1,37 @@
+UKCAT Evaluation Metrics (Operational Definitions)
+==================================================
+
+precision_micro
+- Definition: Of all labels predicted, how many were correct (pooled across all rows/labels).
+- Formula: TP / (TP + FP)
+
+recall_micro
+- Definition: Of all true labels, how many were found (pooled across all rows/labels).
+- Formula: TP / (TP + FN)
+
+f1_micro
+- Definition: Single score balancing micro precision and micro recall.
+- Formula: 2TP / (2TP + FP + FN)
+
+f1_macro
+- Definition: Average F1 across UK-CAT labels, treating each label equally (rare labels count as much as common labels).
+- A rare label counts the same as a common label in this average.
+
+subset_accuracy
+- Definition: Exact-match rate; a row is only correct if the full predicted label set exactly matches the true label set.
+- Formula: (# rows with exact set match) / (# rows)
+
+jaccard_samples
+- Definition: Average per-row overlap between predicted and true label sets.
+- Formula (per row): |Pred ∩ True| / |Pred ∪ True|
+- Reported value: mean(Jaccard over rows)
+
+hamming_loss
+- Definition: Fraction of label decisions that are wrong (false positives + false negatives) over all row-label pairs.
+- Formula: (FP + FN) / (total row-label decisions)
+- Note: Lower is better.
+
+Legend
+- TP = true positives
+- FP = false positives
+- FN = false negatives

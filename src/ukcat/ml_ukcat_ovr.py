@@ -72,11 +72,20 @@ def _predict_codes(
     mlb: MultiLabelBinarizer,
     x_test: Sequence[str],
     threshold: float,
+    top_k_fallback: int = 0,
 ) -> Tuple[List[List[str]], pd.DataFrame]:
     probabilities = model.predict_proba(x_test)
     prob_df = pd.DataFrame(probabilities, columns=mlb.classes_)
     # Apply one shared cut-off across labels; this is easy to tune from the CLI.
     pred_binary = (prob_df.values >= threshold).astype(int)
+    if top_k_fallback > 0 and pred_binary.shape[1] > 0:
+        # If a row gets no labels at the threshold, back-fill with the top-k scores.
+        k = min(top_k_fallback, pred_binary.shape[1])
+        for i in range(pred_binary.shape[0]):
+            if pred_binary[i].sum() > 0:
+                continue
+            top_idx = prob_df.iloc[i].to_numpy().argsort()[-k:]
+            pred_binary[i, top_idx] = 1
     pred_codes = mlb.inverse_transform(pred_binary)
     pred_codes = [sorted(set(map(str, codes))) for codes in pred_codes]
     return pred_codes, prob_df
@@ -208,6 +217,13 @@ def create_ukcat_ovr_model(
     help="Probability threshold applied per label",
 )
 @click.option(
+    "--top-k-fallback",
+    default=0,
+    type=int,
+    show_default=True,
+    help="If no labels pass threshold, assign the top-k labels by probability",
+)
+@click.option(
     "--n-jobs",
     default=1,
     type=int,
@@ -239,6 +255,7 @@ def evaluate_ukcat_ovr(
     random_state: int,
     test_size: float,
     threshold: float,
+    top_k_fallback: int,
     n_jobs: int,
     clean_text: bool,
     ngram_max: int,
@@ -251,6 +268,8 @@ def evaluate_ukcat_ovr(
         raise click.ClickException("--test-size must be between 0 and 1")
     if not 0 <= threshold <= 1:
         raise click.ClickException("--threshold must be between 0 and 1")
+    if top_k_fallback < 0:
+        raise click.ClickException("--top-k-fallback must be 0 or greater")
     if ngram_max < 1:
         raise click.ClickException("--ngram-max must be at least 1")
 
@@ -274,6 +293,7 @@ def evaluate_ukcat_ovr(
     click.echo(f" - training rows: {len(x_train):,}")
     click.echo(f" - test rows: {len(x_test):,}")
     click.echo(f" - threshold: {threshold:.2f}")
+    click.echo(f" - top-k fallback: {top_k_fallback}")
     click.echo(f" - n_jobs (OvR): {n_jobs}")
     click.echo(f" - n-grams: 1..{ngram_max} (min_df=3)")
 
@@ -282,7 +302,7 @@ def evaluate_ukcat_ovr(
     model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
     model.fit(x_train, y_train)
 
-    y_pred_codes, _ = _predict_codes(model, mlb, x_test, threshold=threshold)
+    y_pred_codes, _ = _predict_codes(model, mlb, x_test, threshold=threshold, top_k_fallback=top_k_fallback)
 
     eval_df = pd.DataFrame(
         {
