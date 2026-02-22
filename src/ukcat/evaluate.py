@@ -18,6 +18,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MultiLabelBinarizer
 
 from ukcat.ml_icnptso import get_text_corpus
+from ukcat.ml_ukcat_ovr import _build_ukcat_ovr_pipeline, _predict_codes
 from ukcat.settings import (
     ML_DEFAULT_FIELDS,
     ML_RANDOM_STATE,
@@ -28,6 +29,7 @@ from ukcat.settings import (
 )
 
 DEFAULT_SAMPLE_FILES = [SAMPLE_FILE, TOP2000_FILE]
+DEFAULT_UKCAT_FIELDS = ["name", "activities"]
 
 
 def _split_codes(value: object) -> List[str]:
@@ -62,7 +64,7 @@ def _train_icnptso_pipeline(x_train: Sequence[str], y_train: Sequence[str]) -> P
 )
 @click.option(
     "--random-state",
-    default=ML_RANDOM_STATE,
+    default=2026,
     type=int,
     show_default=True,
     help="Random seed used for the train/test split",
@@ -159,6 +161,150 @@ def evaluate_icnptso(
     return results
 
 
+def _load_labelled_ukcat(sample_files: Sequence[str]) -> pd.DataFrame:
+    df = pd.concat([pd.read_csv(f) for f in sample_files], ignore_index=True)
+    labelled = df[df["UKCAT"].notna()].copy()
+    # Keep one labelled row per organisation so all approaches score the same units.
+    return labelled.drop_duplicates(subset=["org_id"], keep="first").reset_index(drop=True)
+
+
+def _evaluate_ukcat_regex_rows(test_df: pd.DataFrame, include_groups: bool) -> pd.DataFrame:
+    id_field = "org_id"
+    corpus = pd.Series(
+        index=test_df[id_field].values,
+        data=get_text_corpus(test_df, fields=DEFAULT_UKCAT_FIELDS, do_cleaning=False),
+    )
+
+    ukcat = pd.read_csv(UKCAT_FILE, index_col="Code")
+    results_list = []
+    for code, row in ukcat.iterrows():
+        if not isinstance(row["Regular expression"], str) or row["Regular expression"] == r"\b()\b":
+            continue
+        with warnings.catch_warnings():
+            warnings.filterwarnings(
+                "ignore",
+                message="This pattern is interpreted as a regular expression, and has match groups.*",
+                category=UserWarning,
+            )
+            criteria = corpus.str.contains(row["Regular expression"], case=False, regex=True)
+            if (
+                isinstance(row["Exclude regular expression"], str)
+                and row["Exclude regular expression"] != r"\b()\b"
+            ):
+                criteria = criteria & ~corpus.str.contains(
+                    row["Exclude regular expression"], case=False, regex=True
+                )
+        matched_ids = corpus.index[criteria]
+        if len(matched_ids) > 0:
+            results_list.append(pd.Series(data=code, index=matched_ids, name="ukcat_code"))
+
+    if results_list:
+        predicted = pd.concat(results_list)
+    else:
+        predicted = pd.Series(dtype=object, name="ukcat_code")
+
+    if include_groups and not predicted.empty:
+        predicted = pd.concat(
+            [
+                predicted,
+                predicted.str[0:2],
+                predicted[predicted.str[2].astype(int) > 1].apply(lambda x: x[0:3] + "00"),
+            ]
+        )
+
+    pred_map = predicted.groupby(level=0).apply(lambda x: sorted(set(x.astype(str)))).rename("predicted_codes")
+    true_map = (
+        test_df.set_index(id_field)["UKCAT"]
+        .astype(str)
+        .apply(_split_codes)
+        .apply(lambda x: sorted(set(x)))
+        .rename("true_codes")
+    )
+
+    eval_df = true_map.to_frame().join(pred_map, how="left").reset_index()
+    eval_df.loc[:, "predicted_codes"] = eval_df["predicted_codes"].apply(lambda x: x if isinstance(x, list) else [])
+    eval_df.loc[:, "prediction_source"] = "regex_rules"
+    return eval_df[[id_field, "true_codes", "predicted_codes", "prediction_source"]]
+
+
+def _evaluate_ukcat_ovr_rows(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    fields: Sequence[str],
+    threshold: float,
+    n_jobs: int,
+    clean_text: bool,
+) -> pd.DataFrame:
+    # Fit on the shared training split and score only the shared test split
+    x_train = get_text_corpus(train_df, fields=list(fields), do_cleaning=clean_text)
+    x_test = get_text_corpus(test_df, fields=list(fields), do_cleaning=clean_text)
+    y_train_codes = train_df["UKCAT"].astype(str).apply(_split_codes)
+    y_test_codes = test_df["UKCAT"].astype(str).apply(_split_codes)
+
+    mlb = MultiLabelBinarizer()
+    y_train = mlb.fit_transform(y_train_codes)
+
+    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs)
+    model.fit(x_train, y_train)
+
+    pred_codes, _ = _predict_codes(model, mlb, x_test, threshold=threshold)
+
+    return pd.DataFrame(
+        {
+            "org_id": test_df["org_id"].astype(str).values,
+            "true_codes": [sorted(set(codes)) for codes in y_test_codes],
+            "predicted_codes": pred_codes,
+            "prediction_source": "ml_model_holdout_ovr",
+        }
+    )
+
+
+def _score_ukcat_multilabel(eval_df: pd.DataFrame) -> dict:
+    mlb = MultiLabelBinarizer()
+    # Fit the scorer on the union so missing predictions/labels do not drop columns
+    all_labels = list(eval_df["true_codes"]) + list(eval_df["predicted_codes"])
+    mlb.fit(all_labels)
+
+    y_true = mlb.transform(eval_df["true_codes"])
+    y_pred = mlb.transform(eval_df["predicted_codes"])
+
+    return {
+        "rows": float(len(eval_df)),
+        "precision_micro": precision_score(y_true, y_pred, average="micro", zero_division=0),
+        "recall_micro": recall_score(y_true, y_pred, average="micro", zero_division=0),
+        "f1_micro": f1_score(y_true, y_pred, average="micro", zero_division=0),
+        "f1_macro": f1_score(y_true, y_pred, average="macro", zero_division=0),
+        "subset_accuracy": accuracy_score(y_true, y_pred),
+        "jaccard_samples": jaccard_score(y_true, y_pred, average="samples", zero_division=0),
+        "hamming_loss": hamming_loss(y_true, y_pred),
+    }
+
+
+def _print_ukcat_metrics(metrics: dict) -> None:
+    click.echo("Evaluation metrics")
+    click.echo(f" - rows: {int(metrics['rows']):,}")
+    click.echo(f" - precision_micro: {metrics['precision_micro']:.4f}")
+    click.echo(f" - recall_micro: {metrics['recall_micro']:.4f}")
+    click.echo(f" - f1_micro: {metrics['f1_micro']:.4f}")
+    click.echo(f" - f1_macro: {metrics['f1_macro']:.4f}")
+    click.echo(f" - subset_accuracy: {metrics['subset_accuracy']:.4f}")
+    click.echo(f" - jaccard_samples: {metrics['jaccard_samples']:.4f}")
+    click.echo(f" - hamming_loss: {metrics['hamming_loss']:.4f}")
+
+
+def _serialize_ukcat_eval_rows(eval_df: pd.DataFrame) -> pd.DataFrame:
+    output = eval_df.copy()
+    output.loc[:, "true_codes"] = output["true_codes"].apply(_join_codes)
+    output.loc[:, "predicted_codes"] = output["predicted_codes"].apply(_join_codes)
+    return output
+
+
+def _format_compare_metric(value: float, metric_name: str) -> str:
+    if metric_name == "rows":
+        return str(int(value))
+    return f"{value:.4f}"
+
+
 @click.command()
 @click.option(
     "--sample-files",
@@ -173,113 +319,172 @@ def evaluate_icnptso(
     help="Include parent/group codes in predictions before scoring",
 )
 @click.option(
+    "--compare/--no-compare",
+    default=False,
+    show_default=True,
+    help="Compare all registered UKCAT approaches on a shared holdout split",
+)
+@click.option(
+    "--approach",
+    "approaches",
+    type=click.Choice(["regex", "ovr"], case_sensitive=False),
+    multiple=True,
+    default=(),
+    help="Approach(es) to run in compare mode (defaults to all registered approaches)",
+)
+@click.option(
+    "--random-state",
+    default=2026,
+    type=int,
+    show_default=True,
+    help="Random seed used for compare-mode holdout split",
+)
+@click.option(
+    "--test-size",
+    default=ML_TEST_TRAIN_SIZE,
+    type=float,
+    show_default=True,
+    help="Fraction of rows used for compare-mode test split",
+)
+@click.option(
+    "--threshold",
+    default=0.5,
+    type=float,
+    show_default=True,
+    help="Probability threshold used by the OvR approach in compare mode",
+)
+@click.option(
+    "--n-jobs",
+    default=1,
+    type=int,
+    show_default=True,
+    help="Number of parallel jobs used by the OvR approach in compare mode",
+)
+@click.option(
+    "--fields",
+    "-f",
+    multiple=True,
+    default=DEFAULT_UKCAT_FIELDS,
+    help="Fields used by ML approaches to create the text corpus in compare mode",
+)
+@click.option(
+    "--clean-text/--no-clean-text",
+    default=False,
+    show_default=True,
+    help="Apply NLP cleaning for the OvR approach in compare mode",
+)
+@click.option(
     "--save-location",
     default=None,
     type=click.Path(exists=False, file_okay=True, dir_okay=False, writable=True),
-    help="Optional CSV output with row-level evaluation details",
+    help="Row-level CSV for regex mode, or summary CSV in compare mode",
+)
+@click.option(
+    "--save-predictions-prefix",
+    default=None,
+    type=str,
+    help="Optional prefix for per-approach row-level CSV outputs in compare mode",
 )
 def evaluate_ukcat(
     sample_files: Sequence[str],
     include_groups: bool,
+    compare: bool,
+    approaches: Sequence[str],
+    random_state: int,
+    test_size: float,
+    threshold: float,
+    n_jobs: int,
+    fields: Sequence[str],
+    clean_text: bool,
     save_location: Optional[str],
+    save_predictions_prefix: Optional[str],
 ) -> pd.DataFrame:
-    """Evaluate UKCAT regex tagging against labelled sample files."""
-    id_field = "org_id"
-    category_field = "UKCAT"
-    fields_to_use = ["name", "activities"]
+    """Evaluate UKCAT regex tagging, or compare UKCAT approaches on a shared split."""
+    if not compare:
+        labelled = _load_labelled_ukcat(sample_files)
+        click.echo(f"Loaded labelled data [{len(labelled):,} rows]")
 
-    df = pd.concat([pd.read_csv(f) for f in sample_files], ignore_index=True)
-    labelled = df[df[category_field].notna()].copy()
+        eval_df = _evaluate_ukcat_regex_rows(labelled, include_groups=include_groups)
+        metrics = _score_ukcat_multilabel(eval_df)
+        _print_ukcat_metrics(metrics)
 
+        output = _serialize_ukcat_eval_rows(eval_df)
+        if save_location:
+            output.to_csv(save_location, index=False)
+            click.echo(f"Saved row-level results to [{save_location}]")
+        return output
+
+    if not 0 < test_size < 1:
+        raise click.ClickException("--test-size must be between 0 and 1")
+    if not 0 <= threshold <= 1:
+        raise click.ClickException("--threshold must be between 0 and 1")
+    if n_jobs < 1:
+        raise click.ClickException("--n-jobs must be at least 1")
+
+    labelled = _load_labelled_ukcat(sample_files)
     click.echo(f"Loaded labelled data [{len(labelled):,} rows]")
+    click.echo("Using shared holdout split for all approaches")
 
-    charities = labelled.drop_duplicates(subset=[id_field], keep="first").copy()
-    charities = charities.set_index(id_field)
-    corpus = pd.Series(
-        index=charities.index,
-        data=get_text_corpus(charities, fields=fields_to_use, do_cleaning=False),
+    train_df, test_df = train_test_split(
+        labelled,
+        test_size=test_size,
+        random_state=random_state,
+        shuffle=True,
     )
+    train_df = train_df.reset_index(drop=True)
+    test_df = test_df.reset_index(drop=True)
 
-    ukcat = pd.read_csv(UKCAT_FILE, index_col="Code")
-    results_list = []
-    for code, row in ukcat.iterrows():
-        if not isinstance(row["Regular expression"], str) or row["Regular expression"] == r"\b()\b":
-            continue
-        with warnings.catch_warnings():
-            # Many project regexes use capture groups; pandas warns on this in str.contains,
-            # but matching behaviour is still correct for boolean filtering
-            warnings.filterwarnings(
-                "ignore",
-                message="This pattern is interpreted as a regular expression, and has match groups.*",
-                category=UserWarning,
-            )
-            criteria = corpus.str.contains(row["Regular expression"], case=False, regex=True)
-            if (
-                isinstance(row["Exclude regular expression"], str)
-                and row["Exclude regular expression"] != r"\b()\b"
-            ):
-                criteria = criteria & ~corpus.str.contains(
-                    row["Exclude regular expression"], case=False, regex=True
-                )
-        results_list.append(pd.Series(data=code, index=charities[criteria].index, name="ukcat_code"))
+    click.echo(f" - training rows: {len(train_df):,}")
+    click.echo(f" - test rows: {len(test_df):,}")
 
-    if results_list:
-        predicted = pd.concat(results_list)
-    else:
-        predicted = pd.Series(dtype=object, name="ukcat_code")
+    evaluators = {
+        "regex": lambda: _evaluate_ukcat_regex_rows(test_df=test_df, include_groups=include_groups),
+        "ovr": lambda: _evaluate_ukcat_ovr_rows(
+            train_df=train_df,
+            test_df=test_df,
+            fields=fields,
+            threshold=threshold,
+            n_jobs=n_jobs,
+            clean_text=clean_text,
+        ),
+    }
+    # Default compare mode runs every registered approach so future models slot in cleanly..
+    approach_list = [a.lower() for a in approaches] if approaches else list(evaluators.keys())
+    click.echo(f" - approaches: {', '.join(approach_list)}")
 
-    if include_groups:
-        predicted = pd.concat(
-            [
-                predicted,
-                predicted.str[0:2],
-                predicted[predicted.str[2].astype(int) > 1].apply(lambda x: x[0:3] + "00"),
-            ]
-        )
+    metric_rows = []
+    for approach in approach_list:
+        click.echo(f"Scoring approach: {approach}")
+        eval_df = evaluators[approach]()
+        metric_rows.append({"approach": approach, **_score_ukcat_multilabel(eval_df)})
 
-    pred_map = predicted.groupby(level=0).apply(lambda x: sorted(set(x.astype(str)))).rename("predicted_codes")
-    true_map = (
-        labelled.groupby(id_field)[category_field]
-        .first()
-        .apply(_split_codes)
-        .apply(lambda x: sorted(set(x)))
-        .rename("true_codes")
-    )
+        if save_predictions_prefix:
+            output_df = _serialize_ukcat_eval_rows(eval_df)
+            output_path = f"{save_predictions_prefix}_{approach}.csv"
+            output_df.to_csv(output_path, index=False)
+            click.echo(f" - saved row-level predictions: {output_path}")
 
-    eval_df = true_map.to_frame().join(pred_map, how="left")
-    eval_df.loc[:, "predicted_codes"] = eval_df["predicted_codes"].apply(lambda x: x if isinstance(x, list) else [])
-
-    mlb = MultiLabelBinarizer()
-    all_labels = list(eval_df["true_codes"]) + list(eval_df["predicted_codes"])
-    mlb.fit(all_labels)
-
-    y_true = mlb.transform(eval_df["true_codes"])
-    y_pred = mlb.transform(eval_df["predicted_codes"])
-
-    precision_micro = precision_score(y_true, y_pred, average="micro", zero_division=0)
-    recall_micro = recall_score(y_true, y_pred, average="micro", zero_division=0)
-    f1_micro = f1_score(y_true, y_pred, average="micro", zero_division=0)
-    f1_macro = f1_score(y_true, y_pred, average="macro", zero_division=0)
-    subset_accuracy = accuracy_score(y_true, y_pred)
-    jaccard_samples = jaccard_score(y_true, y_pred, average="samples", zero_division=0)
-    hamming = hamming_loss(y_true, y_pred)
-
-    click.echo("Evaluation metrics")
-    click.echo(f" - rows: {len(eval_df):,}")
-    click.echo(f" - precision_micro: {precision_micro:.4f}")
-    click.echo(f" - recall_micro: {recall_micro:.4f}")
-    click.echo(f" - f1_micro: {f1_micro:.4f}")
-    click.echo(f" - f1_macro: {f1_macro:.4f}")
-    click.echo(f" - subset_accuracy: {subset_accuracy:.4f}")
-    click.echo(f" - jaccard_samples: {jaccard_samples:.4f}")
-    click.echo(f" - hamming_loss: {hamming:.4f}")
-
-    output = eval_df.reset_index()
-    output.loc[:, "true_codes"] = output["true_codes"].apply(_join_codes)
-    output.loc[:, "predicted_codes"] = output["predicted_codes"].apply(_join_codes)
+    summary = pd.DataFrame(metric_rows)
+    metric_order = [
+        "rows",
+        "precision_micro",
+        "recall_micro",
+        "f1_micro",
+        "f1_macro",
+        "subset_accuracy",
+        "jaccard_samples",
+        "hamming_loss",
+    ]
+    click.echo("Comparison metrics")
+    for metric_name in metric_order:
+        parts = [
+            f"{row['approach']}={_format_compare_metric(float(row[metric_name]), metric_name)}"
+            for _, row in summary.iterrows()
+        ]
+        click.echo(f" - {metric_name}: " + " | ".join(parts))
 
     if save_location:
-        output.to_csv(save_location, index=False)
-        click.echo(f"Saved row-level results to [{save_location}]")
+        summary.to_csv(save_location, index=False)
+        click.echo(f"Saved summary metrics to [{save_location}]")
 
-    return output
+    return summary

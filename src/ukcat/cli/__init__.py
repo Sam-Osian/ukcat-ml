@@ -10,6 +10,7 @@ from ukcat.fetch_sample import fetch_sample
 from ukcat.fetch_tags import fetch_tags
 from ukcat.make_docs import make_ukcat_docs
 from ukcat.ml_icnptso import create_ml_model
+from ukcat.ml_ukcat_ovr import create_ukcat_ovr_model, evaluate_ukcat_ovr
 
 load_dotenv()
 
@@ -45,6 +46,7 @@ def train():
 
 
 train.add_command(create_ml_model, name="icnptso")
+train.add_command(create_ukcat_ovr_model, name="ukcat-ovr")
 
 
 @ukcat.group("docs")
@@ -62,3 +64,4 @@ def evaluate():
 
 evaluate.add_command(evaluate_icnptso, name="icnptso")
 evaluate.add_command(evaluate_ukcat, name="ukcat")
+evaluate.add_command(evaluate_ukcat_ovr, name="ukcat-ovr")
