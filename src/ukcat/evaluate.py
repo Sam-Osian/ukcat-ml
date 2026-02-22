@@ -18,6 +18,12 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MultiLabelBinarizer
 
 from ukcat.ml_icnptso import get_text_corpus
+from ukcat.ml_ukcat_hybrid import (
+    HYBRID_RULE_CHOICES,
+    HYBRID_RULE_OVR_REGEX_FALLBACK,
+    DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLD,
+    combine_hybrid_predictions,
+)
 from ukcat.ml_ukcat_ovr import _build_ukcat_ovr_pipeline, _predict_codes
 from ukcat.settings import (
     ML_DEFAULT_FIELDS,
@@ -237,6 +243,29 @@ def _evaluate_ukcat_ovr_rows(
     ngram_max: int,
     clean_text: bool,
 ) -> pd.DataFrame:
+    eval_df, _ = _evaluate_ukcat_ovr_rows_with_scores(
+        train_df=train_df,
+        test_df=test_df,
+        fields=fields,
+        threshold=threshold,
+        top_k_fallback=top_k_fallback,
+        n_jobs=n_jobs,
+        ngram_max=ngram_max,
+        clean_text=clean_text,
+    )
+    return eval_df
+
+
+def _evaluate_ukcat_ovr_rows_with_scores(
+    train_df: pd.DataFrame,
+    test_df: pd.DataFrame,
+    fields: Sequence[str],
+    threshold: float,
+    top_k_fallback: int,
+    n_jobs: int,
+    ngram_max: int,
+    clean_text: bool,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     # Fit on the shared training split and score only the shared test split
     x_train = get_text_corpus(train_df, fields=list(fields), do_cleaning=clean_text)
     x_test = get_text_corpus(test_df, fields=list(fields), do_cleaning=clean_text)
@@ -249,15 +278,14 @@ def _evaluate_ukcat_ovr_rows(
     model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
     model.fit(x_train, y_train)
 
-    pred_codes, _ = _predict_codes(
+    pred_codes, prob_df = _predict_codes(
         model,
         mlb,
         x_test,
         threshold=threshold,
         top_k_fallback=top_k_fallback,
     )
-
-    return pd.DataFrame(
+    eval_df = pd.DataFrame(
         {
             "org_id": test_df["org_id"].astype(str).values,
             "true_codes": [sorted(set(codes)) for codes in y_test_codes],
@@ -265,6 +293,8 @@ def _evaluate_ukcat_ovr_rows(
             "prediction_source": "ml_model_holdout_ovr",
         }
     )
+    prob_df.index = test_df["org_id"].astype(str).values
+    return eval_df, prob_df
 
 
 def _score_ukcat_multilabel(eval_df: pd.DataFrame) -> dict:
@@ -335,7 +365,7 @@ def _format_compare_metric(value: float, metric_name: str) -> str:
 @click.option(
     "--approach",
     "approaches",
-    type=click.Choice(["regex", "ovr"], case_sensitive=False),
+    type=click.Choice(["regex", "ovr", "hybrid"], case_sensitive=False),
     multiple=True,
     default=(),
     help="Approach(es) to run in compare mode (defaults to all registered approaches)",
@@ -396,6 +426,20 @@ def _format_compare_metric(value: float, metric_name: str) -> str:
     help="Apply NLP cleaning for the OvR approach in compare mode",
 )
 @click.option(
+    "--hybrid-rule",
+    type=click.Choice(HYBRID_RULE_CHOICES, case_sensitive=False),
+    default=HYBRID_RULE_OVR_REGEX_FALLBACK,
+    show_default=True,
+    help="Decision rule used by the hybrid approach in compare mode",
+)
+@click.option(
+    "--hybrid-label-confidence-threshold",
+    default=DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLD,
+    type=float,
+    show_default=True,
+    help="Label-level OvR probability gate used by label_conf_gated_regex in compare mode",
+)
+@click.option(
     "--save-location",
     default=None,
     type=click.Path(exists=False, file_okay=True, dir_okay=False, writable=True),
@@ -420,6 +464,8 @@ def evaluate_ukcat(
     ngram_max: int,
     fields: Sequence[str],
     clean_text: bool,
+    hybrid_rule: str,
+    hybrid_label_confidence_threshold: float,
     save_location: Optional[str],
     save_predictions_prefix: Optional[str],
 ) -> pd.DataFrame:
@@ -448,6 +494,8 @@ def evaluate_ukcat(
         raise click.ClickException("--n-jobs must be at least 1")
     if ngram_max < 1:
         raise click.ClickException("--ngram-max must be at least 1")
+    if not 0 <= hybrid_label_confidence_threshold <= 1:
+        raise click.ClickException("--hybrid-label-confidence-threshold must be between 0 and 1")
 
     labelled = _load_labelled_ukcat(sample_files)
     click.echo(f"Loaded labelled data [{len(labelled):,} rows]")
@@ -465,18 +513,44 @@ def evaluate_ukcat(
     click.echo(f" - training rows: {len(train_df):,}")
     click.echo(f" - test rows: {len(test_df):,}")
 
+    cache: dict = {}
+
+    def _regex_eval() -> pd.DataFrame:
+        if "regex_eval" not in cache:
+            cache["regex_eval"] = _evaluate_ukcat_regex_rows(test_df=test_df, include_groups=include_groups)
+        return cache["regex_eval"]
+
+    def _ovr_eval() -> pd.DataFrame:
+        if "ovr_eval" not in cache or "ovr_scores" not in cache:
+            eval_df, prob_df = _evaluate_ukcat_ovr_rows_with_scores(
+                train_df=train_df,
+                test_df=test_df,
+                fields=fields,
+                threshold=threshold,
+                top_k_fallback=top_k_fallback,
+                n_jobs=n_jobs,
+                ngram_max=ngram_max,
+                clean_text=clean_text,
+            )
+            cache["ovr_eval"] = eval_df
+            cache["ovr_scores"] = prob_df
+        return cache["ovr_eval"]
+
+    def _hybrid_eval() -> pd.DataFrame:
+        # Hybrid only defines the decision rule; it reuses the shared regex and OvR outputs.
+        _ = _ovr_eval()
+        return combine_hybrid_predictions(
+            ovr_eval_df=cache["ovr_eval"],
+            regex_eval_df=_regex_eval(),
+            ovr_probability_df=cache["ovr_scores"],
+            rule=hybrid_rule.lower(),
+            label_confidence_threshold=hybrid_label_confidence_threshold,
+        )
+
     evaluators = {
-        "regex": lambda: _evaluate_ukcat_regex_rows(test_df=test_df, include_groups=include_groups),
-        "ovr": lambda: _evaluate_ukcat_ovr_rows(
-            train_df=train_df,
-            test_df=test_df,
-            fields=fields,
-            threshold=threshold,
-            top_k_fallback=top_k_fallback,
-            n_jobs=n_jobs,
-            ngram_max=ngram_max,
-            clean_text=clean_text,
-        ),
+        "regex": _regex_eval,
+        "ovr": _ovr_eval,
+        "hybrid": _hybrid_eval,
     }
     # Default compare mode runs every registered approach so future models slot in cleanly..
     approach_list = [a.lower() for a in approaches] if approaches else list(evaluators.keys())
