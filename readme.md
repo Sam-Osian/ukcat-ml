@@ -168,6 +168,18 @@ This will create the `charities_active-icnptso.csv` and `charities_inactive-icnp
 
 You can choose to include the name of the charity and the tag name by adding the `--add-names` option.
 
+#### Evaluate ICNP/TSO and UK-CAT results
+
+The CLI also includes evaluation commands using labelled charities in `sample.csv` and `top2000.csv` by default.
+
+```sh
+python -m ukcat evaluate icnptso
+python -m ukcat evaluate ukcat
+```
+
+Both commands print summary metrics to the terminal. You can optionally save row-level evaluation outputs using `--save-location`.
+
+
 ## Using the python scripts
 
 The scripts included in the repository were created using Python 3.9. They are likely to work with other versions of Python too.

@@ -28,7 +28,7 @@ from ukcat.settings import (
 
 lemma = WordNetLemmatizer()
 
-nltk.download("stopwords")
+nltk.download("stopwords", quiet=True)
 STOPWORDS = set(stopwords.words("english") + ADDITIONAL_STOPWORDS)
 
 
@@ -53,8 +53,8 @@ def get_text_corpus(
     fill_activities: bool = True,
     do_cleaning: bool = True,
 ) -> np.ndarray:
-    nltk.download("stopwords")
-    nltk.download("wordnet")
+    nltk.download("stopwords", quiet=True)
+    nltk.download("wordnet", quiet=True)
 
     # if available then fill the activities field with objects if it's not available
     if fill_activities and ("objects" in df.columns) and ("activities" in fields):

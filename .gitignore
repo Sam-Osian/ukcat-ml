@@ -1,5 +1,8 @@
 data/**
 working/
+__pycache__/
+.vscode/
+*.py[cod]
 !data/.keep
 !data/ukcat.csv
 !data/sample.csv

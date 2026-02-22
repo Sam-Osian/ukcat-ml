@@ -4,6 +4,7 @@ from dotenv import load_dotenv
 from ukcat.__about__ import __version__
 from ukcat.apply_icnptso import apply_icnptso
 from ukcat.apply_ukcat import apply_ukcat
+from ukcat.evaluate import evaluate_icnptso, evaluate_ukcat
 from ukcat.fetch_charities import fetch_charities
 from ukcat.fetch_sample import fetch_sample
 from ukcat.fetch_tags import fetch_tags
@@ -52,3 +53,12 @@ def docs():
 
 
 docs.add_command(make_ukcat_docs, name="ukcat")
+
+
+@ukcat.group("evaluate")
+def evaluate():
+    pass
+
+
+evaluate.add_command(evaluate_icnptso, name="icnptso")
+evaluate.add_command(evaluate_ukcat, name="ukcat")
