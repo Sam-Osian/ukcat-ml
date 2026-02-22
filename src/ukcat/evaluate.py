@@ -13,13 +13,15 @@ from sklearn.metrics import (
     precision_score,
     recall_score,
 )
-from sklearn.model_selection import KFold, StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MultiLabelBinarizer
 
 from ukcat.ml_icnptso import get_text_corpus
 from ukcat.settings import (
     ML_DEFAULT_FIELDS,
+    ML_RANDOM_STATE,
+    ML_TEST_TRAIN_SIZE,
     SAMPLE_FILE,
     TOP2000_FILE,
     UKCAT_FILE,
@@ -59,18 +61,18 @@ def _train_icnptso_pipeline(x_train: Sequence[str], y_train: Sequence[str]) -> P
     help="CSV files used as gold labels for evaluation",
 )
 @click.option(
-    "--cv-folds",
-    default=5,
+    "--random-state",
+    default=ML_RANDOM_STATE,
     type=int,
     show_default=True,
-    help="Number of folds used for cross-validation in leakage-safe evaluation mode",
+    help="Random seed used for the train/test split",
 )
 @click.option(
-    "--random-state",
-    default=2026,
-    type=int,
+    "--test-size",
+    default=ML_TEST_TRAIN_SIZE,
+    type=float,
     show_default=True,
-    help="Random seed used in leakage-safe cross-validation mode",
+    help="Fraction of rows used for the test split",
 )
 @click.option(
     "--save-location",
@@ -80,8 +82,8 @@ def _train_icnptso_pipeline(x_train: Sequence[str], y_train: Sequence[str]) -> P
 )
 def evaluate_icnptso(
     sample_files: Sequence[str],
-    cv_folds: int,
     random_state: int,
+    test_size: float,
     save_location: Optional[str],
 ) -> pd.DataFrame:
     """Evaluate ICNPTSO ML predictions against labelled sample files."""
@@ -95,68 +97,44 @@ def evaluate_icnptso(
 
     click.echo(f"Loaded labelled data [{len(df):,} rows]")
 
-    y_all = df[category_field].astype(str)
+    if not 0 < test_size < 1:
+        raise click.ClickException("--test-size must be between 0 and 1")
 
-    click.echo("Using leakage-safe cross-validation mode")
+    click.echo("Using holdout train/test evaluation mode")
     x_all = get_text_corpus(df, fields=fields_to_use, do_cleaning=True)
-    y_array = y_all.reset_index(drop=True)
-    id_array = df[id_field].reset_index(drop=True)
+    y_all = df[category_field].astype(str).reset_index(drop=True)
+    id_all = df[id_field].reset_index(drop=True)
 
-    if cv_folds < 2:
-        raise click.ClickException("--cv-folds must be at least 2")
-
-    min_class_count = y_array.value_counts().min()
-    effective_folds = min(cv_folds, len(y_array))
-    if y_array.nunique() > 1 and min_class_count >= 2:
-        if effective_folds > min_class_count:
-            click.echo(
-                f"Requested {effective_folds} folds but smallest class has {min_class_count} rows; "
-                f"using {min_class_count} folds"
-            )
-            effective_folds = int(min_class_count)
-        # Prefer stratified folds so class proportions are more stable across splits
-        splitter = StratifiedKFold(n_splits=effective_folds, shuffle=True, random_state=random_state)
-        split_iter = splitter.split(x_all, y_array)
-        click.echo(f" - stratified folds: {effective_folds}")
+    stratify = y_all if y_all.nunique() > 1 and y_all.value_counts().min() >= 2 else None
+    if stratify is None:
+        click.echo(" - unstratified split (insufficient class counts for stratification)")
     else:
-        click.echo("Stratified CV not possible (insufficient class counts), using unstratified KFold")
-        # Rare classes can make stratification impossible (e.g. singletons)
-        splitter = KFold(n_splits=effective_folds, shuffle=True, random_state=random_state)
-        split_iter = splitter.split(x_all)
-        click.echo(f" - unstratified folds: {effective_folds}")
+        click.echo(" - stratified split")
 
-    y_pred_list: List[str] = ["" for _ in range(len(y_array))]
-    y_prob_list: List[Optional[float]] = [None for _ in range(len(y_array))]
-    source = pd.Series("ml_model_cv", index=range(len(y_array)))
+    x_train, x_test, y_train, y_test, id_train, id_test = train_test_split(
+        x_all,
+        y_all,
+        id_all,
+        test_size=test_size,
+        random_state=random_state,
+        stratify=stratify,
+    )
+    click.echo(f" - training rows: {len(y_train):,}")
+    click.echo(f" - test rows: {len(y_test):,}")
 
-    for fold_number, (train_idx, test_idx) in enumerate(split_iter, start=1):
-        click.echo(f" - fold {fold_number}/{effective_folds}")
-        x_train = x_all[train_idx]
-        x_test = x_all[test_idx]
-        y_train = y_array.iloc[train_idx]
-
-        model = _train_icnptso_pipeline(x_train, y_train)
-        y_pred_proba = model.predict_proba(x_test)
-        y_pred_proba_df = pd.DataFrame(y_pred_proba, columns=model.classes_)
-        fold_pred = y_pred_proba_df.idxmax(axis=1).astype(str).tolist()
-        fold_prob = y_pred_proba_df.max(axis=1).round(4).tolist()
-
-        for idx, pred, prob in zip(test_idx, fold_pred, fold_prob):
-            y_pred_list[idx] = pred
-            y_prob_list[idx] = prob
-
-    eval_ids = id_array
-    y_true = y_array
-    y_pred = pd.Series(y_pred_list)
-    y_pred_probability = pd.Series(y_prob_list)
+    model = _train_icnptso_pipeline(x_train, y_train)
+    y_pred_proba = model.predict_proba(x_test)
+    y_pred_proba_df = pd.DataFrame(y_pred_proba, columns=model.classes_)
+    y_pred = y_pred_proba_df.idxmax(axis=1).astype(str)
+    y_pred_probability = y_pred_proba_df.max(axis=1).round(4)
 
     results = pd.DataFrame(
         {
-            id_field: eval_ids.values,
-            "y_true": y_true.values,
+            id_field: pd.Series(id_test).values,
+            "y_true": pd.Series(y_test).values,
             "y_pred": y_pred.values,
             "prediction_probability": y_pred_probability.values,
-            "prediction_source": source.values,
+            "prediction_source": "ml_model_holdout",
         }
     )
 
