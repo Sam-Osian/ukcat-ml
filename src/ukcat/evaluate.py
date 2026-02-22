@@ -233,6 +233,7 @@ def _evaluate_ukcat_ovr_rows(
     fields: Sequence[str],
     threshold: float,
     n_jobs: int,
+    ngram_max: int,
     clean_text: bool,
 ) -> pd.DataFrame:
     # Fit on the shared training split and score only the shared test split
@@ -244,7 +245,7 @@ def _evaluate_ukcat_ovr_rows(
     mlb = MultiLabelBinarizer()
     y_train = mlb.fit_transform(y_train_codes)
 
-    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs)
+    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
     model.fit(x_train, y_train)
 
     pred_codes, _ = _predict_codes(model, mlb, x_test, threshold=threshold)
@@ -361,6 +362,13 @@ def _format_compare_metric(value: float, metric_name: str) -> str:
     help="Number of parallel jobs used by the OvR approach in compare mode",
 )
 @click.option(
+    "--ngram-max",
+    default=2,
+    type=int,
+    show_default=True,
+    help="Maximum n-gram size for the OvR vectoriser in compare mode (uses 1..N)",
+)
+@click.option(
     "--fields",
     "-f",
     multiple=True,
@@ -394,6 +402,7 @@ def evaluate_ukcat(
     test_size: float,
     threshold: float,
     n_jobs: int,
+    ngram_max: int,
     fields: Sequence[str],
     clean_text: bool,
     save_location: Optional[str],
@@ -420,6 +429,8 @@ def evaluate_ukcat(
         raise click.ClickException("--threshold must be between 0 and 1")
     if n_jobs < 1:
         raise click.ClickException("--n-jobs must be at least 1")
+    if ngram_max < 1:
+        raise click.ClickException("--ngram-max must be at least 1")
 
     labelled = _load_labelled_ukcat(sample_files)
     click.echo(f"Loaded labelled data [{len(labelled):,} rows]")
@@ -445,6 +456,7 @@ def evaluate_ukcat(
             fields=fields,
             threshold=threshold,
             n_jobs=n_jobs,
+            ngram_max=ngram_max,
             clean_text=clean_text,
         ),
     }

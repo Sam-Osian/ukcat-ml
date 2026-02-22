@@ -48,11 +48,13 @@ def _load_labelled_ukcat(sample_files: Sequence[str]) -> pd.DataFrame:
     return df
 
 
-def _build_ukcat_ovr_pipeline(n_jobs: int) -> Pipeline:
+def _build_ukcat_ovr_pipeline(n_jobs: int, ngram_max: int = 2) -> Pipeline:
+    if ngram_max < 1:
+        raise ValueError("ngram_max must be at least 1")
     # Parallelise at the OvR level and avoid nested parallelism in LogisticRegression.
     return Pipeline(
         [
-            ("vect", CountVectorizer()),
+            ("vect", CountVectorizer(ngram_range=(1, ngram_max), min_df=3)),
             ("tfidf", TfidfTransformer()),
             (
                 "clf",
@@ -113,16 +115,26 @@ def _predict_codes(
     show_default=True,
     help="Apply NLP cleaning before vectorization",
 )
+@click.option(
+    "--ngram-max",
+    default=2,
+    type=int,
+    show_default=True,
+    help="Maximum n-gram size for the OvR vectoriser (uses 1..N)",
+)
 def create_ukcat_ovr_model(
     sample_files: Sequence[str],
     fields: Sequence[str],
     save_location: str,
     n_jobs: int,
     clean_text: bool,
+    ngram_max: int,
 ):
     """Train a multilabel One-vs-Rest UKCAT text classifier."""
     if n_jobs < 1:
         raise click.ClickException("--n-jobs must be at least 1")
+    if ngram_max < 1:
+        raise click.ClickException("--ngram-max must be at least 1")
 
     df = _load_labelled_ukcat(sample_files)
     click.echo(f"Loaded labelled UKCAT data [{len(df):,} rows]")
@@ -135,8 +147,9 @@ def create_ukcat_ovr_model(
 
     click.echo(f" - labels: {len(mlb.classes_):,}")
     click.echo(f" - n_jobs (OvR): {n_jobs}")
+    click.echo(f" - n-grams: 1..{ngram_max} (min_df=3)")
 
-    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs)
+    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
     click.echo("Fitting OvR model")
     model.fit(x_all, y_all)
 
@@ -145,6 +158,8 @@ def create_ukcat_ovr_model(
         "mlb": mlb,
         "fields": list(fields),
         "clean_text": clean_text,
+        "ngram_max": ngram_max,
+        "min_df": 3,
         "model_type": "ukcat_ovr",
     }
 
@@ -206,6 +221,13 @@ def create_ukcat_ovr_model(
     help="Apply NLP cleaning before vectorization",
 )
 @click.option(
+    "--ngram-max",
+    default=2,
+    type=int,
+    show_default=True,
+    help="Maximum n-gram size for the OvR vectoriser (uses 1..N)",
+)
+@click.option(
     "--save-location",
     default=None,
     type=click.Path(exists=False, file_okay=True, dir_okay=False, writable=True),
@@ -219,6 +241,7 @@ def evaluate_ukcat_ovr(
     threshold: float,
     n_jobs: int,
     clean_text: bool,
+    ngram_max: int,
     save_location: Optional[str],
 ) -> pd.DataFrame:
     """Evaluate a holdout OvR UKCAT model with regex-matching multilabel metrics."""
@@ -228,6 +251,8 @@ def evaluate_ukcat_ovr(
         raise click.ClickException("--test-size must be between 0 and 1")
     if not 0 <= threshold <= 1:
         raise click.ClickException("--threshold must be between 0 and 1")
+    if ngram_max < 1:
+        raise click.ClickException("--ngram-max must be at least 1")
 
     df = _load_labelled_ukcat(sample_files)
     click.echo(f"Loaded labelled data [{len(df):,} rows]")
@@ -250,10 +275,11 @@ def evaluate_ukcat_ovr(
     click.echo(f" - test rows: {len(x_test):,}")
     click.echo(f" - threshold: {threshold:.2f}")
     click.echo(f" - n_jobs (OvR): {n_jobs}")
+    click.echo(f" - n-grams: 1..{ngram_max} (min_df=3)")
 
     mlb = MultiLabelBinarizer()
     y_train = mlb.fit_transform(y_train_codes)
-    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs)
+    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
     model.fit(x_train, y_train)
 
     y_pred_codes, _ = _predict_codes(model, mlb, x_test, threshold=threshold)
