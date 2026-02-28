@@ -35,6 +35,12 @@ DEFAULT_TEST_SIZE = 0.2
 DEFAULT_N_JOBS = 4
 FINAL_METRIC_ORDER = ("rows",) + grid.DISPLAY_METRICS
 
+# Workflow model notes:
+# - The saved OVR config describes how charity text is converted into one shared
+#   text model, then split into one binary classifier per UK-CAT code.
+# - The saved hybrid config points to that trained OVR model and adds only the
+#   combination rule needed to merge OvR evidence with regex outputs.
+
 
 def _ensure_parent(path_str: str) -> Path:
     path = Path(path_str)
@@ -125,7 +131,7 @@ def _row_to_config(row: pd.Series, approach: str, args, sort_by: str) -> dict[st
         "threshold": float(row["threshold"]),
         "ngram_max": int(row["ngram_max"]),
         "top_k_fallback": int(row["top_k_fallback"]),
-        "clean_text": bool(args.clean_text),
+        "clean_text": bool(row["clean_text"]),
         "include_groups": bool(args.include_groups),
     }
     if approach == "hybrid":
@@ -145,13 +151,20 @@ def _load_best_config() -> dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def _run_dev_grid(show_top: int, n_jobs: int) -> dict[str, Any]:
+def _run_dev_grid(
+    show_top: int,
+    n_jobs: int,
+    clean_mode: str,
+    random_state: int | None = None,
+) -> dict[str, Any]:
     _check_exists(DEFAULT_DEV_FILE, "Dev split")
     parser = grid._build_parser()
     args = parser.parse_args([])
     args.sample_files = [DEFAULT_DEV_FILE]
     args.show_top = show_top
     args.n_jobs = n_jobs
+    args.clean_text_mode = clean_mode
+    args.random_state = random_state
 
     selected = grid._resolve_selected_approaches_from_knobs()
     args.optimise_metric = grid._resolve_optimise_metric_from_knobs()
@@ -165,6 +178,7 @@ def _run_dev_grid(show_top: int, n_jobs: int) -> dict[str, Any]:
         random_states=random_states,
         grid_count=len(grid_params),
         optimise_metric=args.optimise_metric,
+        clean_mode=args.clean_text_mode,
     )
 
     state_df = grid._run_grid_for_states(
@@ -252,6 +266,15 @@ def _build_ovr_artifacts(
     config: dict[str, Any],
     n_jobs: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
+    # Final holdout evaluation re-fits the selected OvR setup on the dev split,
+    # then scores the untouched test split once.
+    #
+    # Under the hood, the OvR fit:
+    # - concatenates the chosen text fields for each charity row
+    # - vectorises that text into one shared feature matrix
+    # - fits one binary classifier per UK-CAT code on that matrix
+    # The returned probability frame is the charity-by-code score table from that
+    # fit, and the hybrid combiner reuses it directly.
     return _evaluate_ukcat_ovr_rows_with_scores(
         train_df=train_df,
         test_df=test_df,
@@ -297,6 +320,9 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
         include_groups=include_groups,
     )
 
+    # The final report always includes regex so the selected ML variants are
+    # judged against the existing production-style baseline on exactly the same
+    # holdout rows.
     summary_rows: list[dict[str, Any]] = [
         {"approach": "regex", **_metrics_with_weighted_primary(regex_eval_df, config)}
     ]
@@ -329,8 +355,12 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             config=hybrid_config,
             n_jobs=n_jobs,
         )
-        # Hybrid evaluation uses the exact same test rows as regex and OvR so the
-        # comparison is row-for-row aligned and leakage-free.
+        # Hybrid is a decision layer over regex + OvR. 
+        # - regex contributes deterministic label hits from explicit rules
+        # - OvR contributes per-label probabilities learned from labelled text
+        # - the hybrid rule decides when the statistical signal should reinforce,
+        #   suppress, or otherwise alter the regex output
+        # There is no extra hybrid training stage beyond the OVR fit above.
         hybrid_eval_df = combine_hybrid_predictions(
             ovr_eval_df=hybrid_eval_ovr,
             regex_eval_df=regex_eval_df,
@@ -355,10 +385,17 @@ def evaluate_make_split(random_state: int, final_test_size: float) -> None:
 
 @click.command("dev-grid")
 @click.option("--show-top", default=0, type=int, show_default=True)
+@click.option(
+    "--clean-text-mode",
+    default=grid.DEFAULT_CLEAN_TEXT_MODE,
+    type=click.Choice(["off", "on", "compare"]),
+    show_default=True,
+)
+@click.option("--random-state", default=None, type=int)
 @click.option("--n-jobs", default=DEFAULT_N_JOBS, type=int, show_default=True)
-def evaluate_dev_grid(show_top: int, n_jobs: int) -> None:
+def evaluate_dev_grid(show_top: int, clean_text_mode: str, random_state: int | None, n_jobs: int) -> None:
     """Run the dev-only grid search on the fixed dev split."""
-    _run_dev_grid(show_top=show_top, n_jobs=n_jobs)
+    _run_dev_grid(show_top=show_top, n_jobs=n_jobs, clean_mode=clean_text_mode, random_state=random_state)
 
 
 @click.command("final-holdout")
@@ -370,11 +407,23 @@ def evaluate_final_holdout(n_jobs: int) -> None:
 
 @click.command("run-full-workflow")
 @click.option("--show-top", default=0, type=int, show_default=True)
+@click.option(
+    "--clean-text-mode",
+    default=grid.DEFAULT_CLEAN_TEXT_MODE,
+    type=click.Choice(["off", "on", "compare"]),
+    show_default=True,
+)
+@click.option("--random-state", default=None, type=int)
 @click.option("--n-jobs", default=DEFAULT_N_JOBS, type=int, show_default=True)
-def evaluate_run_full_workflow(show_top: int, n_jobs: int) -> None:
+def evaluate_run_full_workflow(show_top: int, clean_text_mode: str, random_state: int | None, n_jobs: int) -> None:
     """Run dev-grid and then locked final-holdout using the saved best config."""
     _check_exists(DEFAULT_DEV_FILE, "Dev split")
     _check_exists(DEFAULT_TEST_FILE, "Final test split")
-    _run_dev_grid(show_top=show_top, n_jobs=n_jobs)
+    _run_dev_grid(
+        show_top=show_top,
+        n_jobs=n_jobs,
+        clean_mode=clean_text_mode,
+        random_state=random_state,
+    )
     click.echo("")
     _run_final_holdout(n_jobs=n_jobs)

@@ -21,17 +21,29 @@ from ukcat.ml_ukcat_hybrid import (
     combine_hybrid_predictions,
 )
 
+# Evaluation model notes:
+# - Regex is the hand-written baseline and emits UK-CAT codes directly from text rules.
+# - OvR turns the charity text fields into one shared feature matrix, then trains one
+#   binary classifier per UK-CAT code on that same matrix. For each charity row it
+#   therefore returns one score per code: "how likely is this label to be present?"
+# - The final OvR multilabel prediction is reconstructed by thresholding those
+#   per-code scores independently, with optional top-k fallback if no label clears
+#   the threshold.
+# - Hybrid does not train a third model. It reuses regex outputs plus those same
+#   OvR per-code scores, then applies a combination rule to decide the final labels.
+
 # Grid defaults: use sequences for sweeps or single values for fixed runs.
 DEFAULT_SAMPLE_FILES = ("data/sample.csv", "data/top2000.csv")
 DEFAULT_RANDOM_STATES = (67, 2026, 42, 123, 321)
 DEFAULT_THRESHOLDS = (0.04, 0.05, 0.06, 0.10, 0.2, 0.25, 0.3)
 DEFAULT_NGRAM_MAX_VALUES = (1, 2, 3)
 DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+DEFAULT_CLEAN_TEXT_MODE = "compare" # can also be set to 'on' or 'off'
 DEFAULT_FIELD_SETS = (
     ("name", "activities"),
-    #("name", "activities", "objects"), # Commented as objects consistently harms performance
+    #("name", "activities", "objects"), # Commented out as objects consistently harms performance
 )
-DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLDS = (0.0001, 0.0002, 0.0003, 0.0004, 0.0005)
+DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLDS = (0.00005, 0.0001, 0.0002, 0.0003, 0.0004, 0.001)
 
 DEFAULT_SELECT_BEST_OVR = True
 DEFAULT_SELECT_BEST_HYBRID = True
@@ -60,8 +72,8 @@ OPTIMISATION_METRICS = tuple(metric for metric, _, _ in OPTIMISATION_METRIC_SPEC
 # Weighted objective coefficients used when DEFAULT_OPTIMISE_WEIGHTED_PRIMARY is True.
 # Keep these non-negative and summing to 1.0.
 WEIGHTED_PRIMARY_F1_MICRO = 0.40
-WEIGHTED_PRIMARY_F1_MACRO = 0.35
-WEIGHTED_PRIMARY_RECALL_MICRO = 0.25
+WEIGHTED_PRIMARY_F1_MACRO = 0.40
+WEIGHTED_PRIMARY_RECALL_MICRO = 0.20
 
 # Optional uardrails (applied to the candidate approach being ranked: OVR and/or Hybrid)
 # Setting to 0 essentially turns that guardrail 'off'
@@ -76,6 +88,7 @@ APPROACHES = ("regex", "ovr", "hybrid")
 BASE_METRICS = ("rows",) + OPTIMISATION_METRICS
 GRID_GROUP_COLUMNS = (
     "fields_key",
+    "clean_text",
     "threshold",
     "ngram_max",
     "top_k_fallback",
@@ -101,6 +114,7 @@ FieldSet = tuple[str, ...]
 @dataclass(frozen=True)
 class GridParams:
     fields: tuple[str, ...]
+    clean_text: bool
     threshold: float
     ngram_max: int
     top_k_fallback: int
@@ -215,9 +229,10 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
-        "--clean-text",
-        action="store_true",
-        help="Apply the existing NLP text cleaning before vectorisation.",
+        "--clean-text-mode",
+        choices=("off", "on", "compare"),
+        default=DEFAULT_CLEAN_TEXT_MODE,
+        help="Use raw text only, cleaned text only, or compare both in the grid.",
     )
     parser.add_argument(
         "--include-groups",
@@ -344,6 +359,9 @@ def _predict_codes(
     threshold: float,
     top_k_fallback: int,
 ) -> list[list[str]]:
+    # OvR produces one probability per label. The multilabel prediction is then
+    # reconstructed by thresholding each label independently, with an optional
+    # fallback that forces the top-k labels on rows where nothing clears the cut
     pred_binary = (prob_df.values >= threshold).astype(int)
     if top_k_fallback > 0 and pred_binary.shape[1] > 0:
         k = min(top_k_fallback, pred_binary.shape[1])
@@ -367,6 +385,11 @@ def _build_eval(
     threshold: float,
     top_k_fallback: int,
 ) -> pd.DataFrame:
+    # At this point the OvR model has already produced a probability table with:
+    # - one row per charity
+    # - one column per UK-CAT code
+    # This helper converts that dense score table back into the repo's standard
+    # multilabel shape: a list of predicted codes per charity row.
     predicted_codes = _predict_codes(
         prob_df=prob_df,
         threshold=threshold,
@@ -392,12 +415,22 @@ def _score_pair(
     params: GridParams,
     hybrid_rule: str,
 ) -> dict:
+    # "ovr" here is a pure One-vs-Rest multilabel model:
+    # - input text is built from the selected charity fields, such as name and activities
+    # - that text is vectorised once into a shared feature space
+    # - one classifier is trained for each UK-CAT code using those shared features
+    # The result is a probability per charity/per code, which is then thresholded
+    # back into a set of predicted labels for the row.
     ovr_eval_df = _build_eval(
         prob_df=ovr_probability_df,
         true_codes_by_org=true_codes_by_org,
         threshold=params.threshold,
         top_k_fallback=params.top_k_fallback,
     )
+    # Hybrid is a second decision layer, not a separate fit. It takes:
+    # - regex labels, which encode strong hand-written rules
+    # - OvR scores, which capture softer statistical evidence from text
+    # and combines them into one final prediction set.
     hybrid_eval_df = combine_hybrid_predictions(
         ovr_eval_df=ovr_eval_df,
         regex_eval_df=regex_eval_df,
@@ -410,6 +443,7 @@ def _score_pair(
 
     row = {
         "fields_key": ",".join(params.fields),
+        "clean_text": params.clean_text,
         "threshold": params.threshold,
         "ngram_max": params.ngram_max,
         "top_k_fallback": params.top_k_fallback,
@@ -442,6 +476,7 @@ def _score_pair(
 
 
 def _grid(params: argparse.Namespace, field_sets: Sequence[FieldSet]) -> list[GridParams]:
+    clean_values = _clean_values(params.clean_text_mode)
     thresholds = [params.threshold] if params.threshold is not None else _parse_float_csv(params.thresholds)
     ngram_max_values = [params.ngram_max] if params.ngram_max is not None else _parse_int_csv(params.ngram_max_values)
     top_k_values = (
@@ -457,13 +492,15 @@ def _grid(params: argparse.Namespace, field_sets: Sequence[FieldSet]) -> list[Gr
     return [
         GridParams(
             fields=field_set,
+            clean_text=clean_text,
             threshold=t,
             ngram_max=n,
             top_k_fallback=k,
             hybrid_label_confidence_threshold=h,
         )
-        for field_set, t, n, k, h in product(
+        for field_set, clean_text, t, n, k, h in product(
             field_sets,
+            clean_values,
             thresholds,
             ngram_max_values,
             top_k_values,
@@ -481,8 +518,18 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--show-top must be 0 or greater")
     if getattr(args, "optimise_metric", None) not in OPTIMISATION_METRICS:
         raise SystemExit(f"Invalid optimise metric: {getattr(args, 'optimise_metric', None)}")
+    if args.clean_text_mode not in {"off", "on", "compare"}:
+        raise SystemExit("--clean-text-mode must be one of: off, on, compare")
     if args.optimise_metric == "weighted_primary":
         _validate_weighted_primary_weights()
+
+
+def _clean_values(mode: str) -> list[bool]:
+    if mode == "off":
+        return [False]
+    if mode == "on":
+        return [True]
+    return [False, True]
 
 
 def _resolve_inputs(args: argparse.Namespace) -> tuple[tuple[str, ...], list[int], list[GridParams]]:
@@ -527,6 +574,7 @@ def _print_top_rows(
     for rank, (_, row) in enumerate(rows_df.head(show_top).iterrows(), start=1):
         base = (
             f" - [{rank}] fields={row['fields_key']}, "
+            f"clean_text={'on' if bool(row['clean_text']) else 'off'}, "
             f"threshold={row['threshold']:.3f}, "
             f"ngram_max={int(row['ngram_max'])}, "
             f"top_k_fallback={int(row['top_k_fallback'])}"
@@ -549,6 +597,7 @@ def _print_best_params(
     if show_selected_by is not None:
         print(f" - selected by: {show_selected_by}")
     print(f" - fields: {best['fields_key']}")
+    print(f" - clean_text: {'on' if bool(best['clean_text']) else 'off'}")
     print(f" - threshold: {best['threshold']:.3f}")
     print(f" - ngram_max: {int(best['ngram_max'])}")
     print(f" - top_k_fallback: {int(best['top_k_fallback'])}")
@@ -566,6 +615,7 @@ def _print_run_header(
     random_states: Sequence[int],
     grid_count: int,
     optimise_metric: str,
+    clean_mode: str,
 ) -> None:
     print(f"Loading labelled data from: {', '.join(sample_files)}")
     print(f"Loaded labelled rows: {labelled_rows:,}")
@@ -579,6 +629,7 @@ def _print_run_header(
             f"{WEIGHTED_PRIMARY_F1_MACRO:.3f}*F1_macro + "
             f"{WEIGHTED_PRIMARY_RECALL_MICRO:.3f}*Recall_micro"
         )
+    print(f"Clean text mode: {clean_mode}")
     print("")
 
 
@@ -589,8 +640,10 @@ def _get_cached_ovr_artifacts(
     args: argparse.Namespace,
     ovr_cache: dict[tuple, tuple[pd.DataFrame, pd.Series]],
 ) -> tuple[pd.DataFrame, pd.Series]:
-    cache_key = (params.ngram_max, bool(args.clean_text), tuple(params.fields), int(args.n_jobs))
+    cache_key = (params.ngram_max, params.clean_text, tuple(params.fields), int(args.n_jobs))
     if cache_key not in ovr_cache:
+        # Only the feature/training knobs require a fresh OvR fit. Thresholds and
+        # hybrid gating are cheap when using cached probabilities
         seed_eval_df, seed_prob_df = _evaluate_ukcat_ovr_rows_with_scores(
             train_df=train_df,
             test_df=test_df,
@@ -599,7 +652,7 @@ def _get_cached_ovr_artifacts(
             top_k_fallback=0,
             n_jobs=args.n_jobs,
             ngram_max=params.ngram_max,
-            clean_text=args.clean_text,
+            clean_text=params.clean_text,
         )
         true_codes_by_org = seed_eval_df.set_index("org_id")["true_codes"].copy()
         true_codes_by_org.index = true_codes_by_org.index.astype(str)
@@ -626,7 +679,8 @@ def _run_grid_for_states(
         train_df = train_df.reset_index(drop=True)
         test_df = test_df.reset_index(drop=True)
 
-        # Regex is independent of OvR tuning parameters, so compute it once per split.
+        # Regex is the fixed baseline for the split. Every OvR and hybrid run is
+        # compared against these same regex predictions on the same test rows
         regex_eval_df = _evaluate_ukcat_regex_rows(test_df=test_df, include_groups=args.include_groups)
         regex_metrics = _score_ukcat_multilabel(regex_eval_df)
 
@@ -634,7 +688,8 @@ def _run_grid_for_states(
         ovr_cache: dict[tuple, tuple[pd.DataFrame, pd.Series]] = {}
         for idx, gp in enumerate(grid_params, start=1):
             print(
-                f"  [{idx}/{len(grid_params)}] fields={','.join(gp.fields)}, threshold={gp.threshold:.3f}, "
+                f"  [{idx}/{len(grid_params)}] fields={','.join(gp.fields)}, "
+                f"clean_text={'on' if gp.clean_text else 'off'}, threshold={gp.threshold:.3f}, "
                 f"ngram_max={gp.ngram_max}, top_k_fallback={gp.top_k_fallback}"
                 f", hybrid_label_confidence_threshold="
                 f"{_fmt_hybrid_conf(gp.hybrid_label_confidence_threshold, hybrid_conf_precision)}"
@@ -755,7 +810,7 @@ def _print_results(
         show_top=args.show_top,
         approach="ovr",
         hybrid_conf_precision=hybrid_conf_precision,
-        dedupe_cols=("threshold", "ngram_max", "top_k_fallback"),
+        dedupe_cols=("clean_text", "threshold", "ngram_max", "top_k_fallback"),
     )
     print(f"\nTop {args.show_top} Hybrid parameter combinations")
     print(f" (ranked by {hybrid_sort_by})")
@@ -831,6 +886,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         random_states=random_states,
         grid_count=len(grid_params),
         optimise_metric=args.optimise_metric,
+        clean_mode=args.clean_text_mode,
     )
 
     per_state_df = _run_grid_for_states(labelled=labelled, random_states=random_states, grid_params=grid_params, args=args)
