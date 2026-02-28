@@ -140,18 +140,65 @@ python -m ukcat train icnptso
 
 By default this will save the model as a pickle file to `./data/icnptso_ml_model.pkl`.
 
-#### Apply UK-CAT categories
+#### Apply UK-CAT regex categories
 
 This script uses the regular expressions from `./data/ukcat.csv` to apply tags to a list of charities.
 
 ```sh
-python -m ukcat apply ukcat --charity-csv "./data/charities_active.csv" -f "name" -f "activities"
-python -m ukcat apply ukcat --charity-csv "./data/charities_inactive.csv" -f "name" -f "objects"
+python -m ukcat apply ukcat-regex --charity-csv "./data/charities_active.csv" -f "name" -f "activities"
+python -m ukcat apply ukcat-regex --charity-csv "./data/charities_inactive.csv" -f "name" -f "objects"
 ```
 
-This will create the `charities_active-ukcat.csv` and `charities_inactive-ukcat.csv` files that are included in the `./data/` folder. Each file gives a number of rows for each charity showing the UK-CAT tags that have been applied based on the regular expression keywords.
+This will create the `charities_active-ukcat-regex.csv` and `charities_inactive-ukcat-regex.csv` files by default. Each file gives a number of rows for each charity showing the UK-CAT tags that have been applied based on the regular expression keywords.
 
 You can choose to include the name of the charity and the tag name by adding the `--add-names` option. You can also choose to add "parent" codes into the same data, by using the `--include-groups` option.
+
+#### Train final UK-CAT OVR and hybrid models
+
+After running the evaluation workflow, the selected best development configuration is stored in:
+
+- `./data/ukcat_best_dev_config.json`
+
+The final training commands read that file automatically and train on all labelled UK-CAT data by default:
+
+```sh
+python -m ukcat train ukcat-ovr --n-jobs 4
+python -m ukcat train ukcat-hybrid --n-jobs 4
+```
+
+By default these save:
+
+- OVR model artifact: `./data/ukcat_ml_ovr.pkl`
+- Hybrid OVR model artifact: `./data/ukcat_ml_hybrid_ovr.pkl`
+- Hybrid config: `./data/ukcat_ml_hybrid.json`
+
+If `./data/ukcat_best_dev_config.json` does not exist, these commands will fail and tell you to run
+`python -m ukcat evaluate dev-grid` first.
+
+#### Apply trained UK-CAT OVR and hybrid models
+
+Once the final artifacts have been trained, you can apply them to new charity files using the same row-per-code
+output shape already used elsewhere in the repo:
+
+```sh
+python -m ukcat apply ukcat-ovr --charity-csv "./data/charities_active.csv"
+python -m ukcat apply ukcat-hybrid --charity-csv "./data/charities_active.csv"
+```
+
+By default these save:
+
+- `charities_active-ukcat-ovr.csv`
+- `charities_active-ukcat-hybrid.csv`
+
+You can also use the inactive file in the same way:
+
+```sh
+python -m ukcat apply ukcat-ovr --charity-csv "./data/charities_inactive.csv"
+python -m ukcat apply ukcat-hybrid --charity-csv "./data/charities_inactive.csv"
+```
+
+As with the regex apply command, you can optionally add category names, sample the input rows for testing, and
+apply manual overrides from the labelled files.
 
 #### Apply ICNP/TSO categories
 
@@ -168,16 +215,70 @@ This will create the `charities_active-icnptso.csv` and `charities_inactive-icnp
 
 You can choose to include the name of the charity and the tag name by adding the `--add-names` option.
 
-#### Evaluate ICNP/TSO and UK-CAT results
+#### Evaluate UK-CAT comparison workflow
 
-The CLI also includes evaluation commands using labelled charities in `sample.csv` and `top2000.csv` by default.
+The evaluation CLI now focuses on one UK-CAT workflow: comparing the `regex`, `ovr`, and `hybrid`
+approaches in a disciplined development and final-holdout process.
+
+The workflow uses the labelled charities in `sample.csv` and `top2000.csv` as the canonical source data,
+then creates a fixed development split and a fixed final holdout:
 
 ```sh
-python -m ukcat evaluate icnptso
-python -m ukcat evaluate ukcat
+python -m ukcat evaluate make-split
 ```
 
-Both commands print summary metrics to the terminal. You can optionally save row-level evaluation outputs using `--save-location`.
+This writes:
+
+- `./data/ukcat_dev.csv`
+- `./data/ukcat_final_test.csv`
+- `./data/ukcat_holdout_split.json`
+
+You can optionally override the fixed split defaults:
+
+```sh
+python -m ukcat evaluate make-split --random-state 2026 --final-test-size 0.2
+```
+
+To run the development-only grid search on the fixed dev split:
+
+```sh
+python -m ukcat evaluate dev-grid
+```
+Or...
+
+```sh
+python -m ukcat evaluate dev-grid --show-top 7 --n-jobs 4
+```
+
+This compares `regex`, `ovr`, and `hybrid`, prints summary metrics, and saves the winning development
+configuration to:
+
+- `./data/ukcat_best_dev_config.json`
+
+To run the locked final holdout evaluation using that saved best configuration:
+
+```sh
+python -m ukcat evaluate final-holdout
+python -m ukcat evaluate final-holdout --n-jobs 4
+```
+
+This trains the selected model settings on `./data/ukcat_dev.csv`, evaluates once on
+`./data/ukcat_final_test.csv`, and prints final comparison metrics for `regex`, `ovr`, and `hybrid`.
+
+To run both stages in sequence after the split already exists:
+
+```sh
+python -m ukcat evaluate run-full-workflow
+python -m ukcat evaluate run-full-workflow --show-top 7 --n-jobs 4
+```
+
+This runs:
+
+1. `dev-grid`
+2. `final-holdout`
+
+The evaluation CLI no longer exposes the older ICNP/TSO evaluation command, and the UK-CAT evaluation
+surface is now fully comparison-oriented.
 
 
 ## Using the python scripts

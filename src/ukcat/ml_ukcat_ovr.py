@@ -1,5 +1,7 @@
+import json
 import pickle
-from typing import Iterable, List, Optional, Sequence, Tuple
+from pathlib import Path
+from typing import Any, Iterable, List, Optional, Sequence, Tuple
 
 import click
 import pandas as pd
@@ -24,6 +26,7 @@ from ukcat.settings import (
     ML_TEST_TRAIN_SIZE,
     SAMPLE_FILE,
     TOP2000_FILE,
+    UKCAT_BEST_DEV_CONFIG,
     UKCAT_ML_OVR_MODEL,
 )
 
@@ -67,6 +70,84 @@ def _build_ukcat_ovr_pipeline(n_jobs: int, ngram_max: int = 2) -> Pipeline:
     )
 
 
+def _load_best_dev_config(best_config_path: str) -> dict[str, Any]:
+    path = Path(best_config_path)
+    if not path.exists():
+        raise click.ClickException(
+            f"Best dev config not found at [{path}]. Run `ukcat evaluate dev-grid` first."
+        )
+    with open(path, "r", encoding="utf-8") as config_file:
+        return json.load(config_file)
+
+
+def _get_selected_model_config(best_config_path: str, approach: str) -> dict[str, Any]:
+    config = _load_best_dev_config(best_config_path)
+    model_config = config.get(approach)
+    if model_config is None:
+        raise click.ClickException(
+            f"Best dev config [{best_config_path}] does not contain a selected [{approach}] config."
+        )
+    return model_config
+
+
+def _train_ukcat_ovr_artifact(
+    sample_files: Sequence[str],
+    fields: Sequence[str],
+    save_location: str,
+    n_jobs: int,
+    clean_text: bool,
+    ngram_max: int,
+    threshold: float,
+    top_k_fallback: int,
+    model_type: str = "ukcat_ovr",
+    extra_metadata: Optional[dict[str, Any]] = None,
+) -> dict[str, Any]:
+    if n_jobs < 1:
+        raise click.ClickException("--n-jobs must be at least 1")
+    if ngram_max < 1:
+        raise click.ClickException("--ngram-max must be at least 1")
+
+    df = _load_labelled_ukcat(sample_files)
+    click.echo(f"Loaded labelled UKCAT data [{len(df):,} rows]")
+
+    x_all = get_text_corpus(df, fields=list(fields), do_cleaning=clean_text)
+    y_codes = df["UKCAT"].astype(str).apply(_split_codes)
+
+    mlb = MultiLabelBinarizer()
+    y_all = mlb.fit_transform(y_codes)
+
+    click.echo(f" - labels: {len(mlb.classes_):,}")
+    click.echo(f" - n_jobs (OvR): {n_jobs}")
+    click.echo(f" - n-grams: 1..{ngram_max} (min_df=3)")
+    click.echo(f" - threshold: {threshold:.3f}")
+    click.echo(f" - top_k_fallback: {top_k_fallback}")
+
+    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
+    click.echo("Fitting OvR model")
+    model.fit(x_all, y_all)
+
+    artifact = {
+        "model": model,
+        "mlb": mlb,
+        "fields": list(fields),
+        "clean_text": clean_text,
+        "ngram_max": ngram_max,
+        "min_df": 3,
+        "threshold": threshold,
+        "top_k_fallback": top_k_fallback,
+        "model_type": model_type,
+    }
+    if extra_metadata:
+        artifact.update(extra_metadata)
+
+    if save_location:
+        click.echo(f"Saving model to [{save_location}]")
+        with open(save_location, "wb") as model_file:
+            pickle.dump(artifact, model_file)
+
+    return artifact
+
+
 def _predict_codes(
     model: Pipeline,
     mlb: MultiLabelBinarizer,
@@ -100,11 +181,10 @@ def _predict_codes(
     help="CSV files used as labelled training data",
 )
 @click.option(
-    "--fields",
-    "-f",
-    multiple=True,
-    default=DEFAULT_FIELDS,
-    help="Fields from which to create a text corpus",
+    "--best-config",
+    default=UKCAT_BEST_DEV_CONFIG,
+    show_default=True,
+    help="Best dev config JSON created by `ukcat evaluate dev-grid`.",
 )
 @click.option(
     "--save-location",
@@ -118,66 +198,29 @@ def _predict_codes(
     show_default=True,
     help="Number of parallel jobs used by One-vs-Rest training",
 )
-@click.option(
-    "--clean-text/--no-clean-text",
-    default=False,
-    show_default=True,
-    help="Apply NLP cleaning before vectorization",
-)
-@click.option(
-    "--ngram-max",
-    default=2,
-    type=int,
-    show_default=True,
-    help="Maximum n-gram size for the OvR vectoriser (uses 1..N)",
-)
 def create_ukcat_ovr_model(
     sample_files: Sequence[str],
-    fields: Sequence[str],
+    best_config: str,
     save_location: str,
     n_jobs: int,
-    clean_text: bool,
-    ngram_max: int,
 ):
-    """Train a multilabel One-vs-Rest UKCAT text classifier."""
-    if n_jobs < 1:
-        raise click.ClickException("--n-jobs must be at least 1")
-    if ngram_max < 1:
-        raise click.ClickException("--ngram-max must be at least 1")
-
-    df = _load_labelled_ukcat(sample_files)
-    click.echo(f"Loaded labelled UKCAT data [{len(df):,} rows]")
-
-    x_all = get_text_corpus(df, fields=list(fields), do_cleaning=clean_text)
-    y_codes = df["UKCAT"].astype(str).apply(_split_codes)
-
-    mlb = MultiLabelBinarizer()
-    y_all = mlb.fit_transform(y_codes)
-
-    click.echo(f" - labels: {len(mlb.classes_):,}")
-    click.echo(f" - n_jobs (OvR): {n_jobs}")
-    click.echo(f" - n-grams: 1..{ngram_max} (min_df=3)")
-
-    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
-    click.echo("Fitting OvR model")
-    model.fit(x_all, y_all)
-
-    artifact = {
-        "model": model,
-        "mlb": mlb,
-        "fields": list(fields),
-        "clean_text": clean_text,
-        "ngram_max": ngram_max,
-        "min_df": 3,
-        "model_type": "ukcat_ovr",
-    }
-
-    if save_location:
-        click.echo(f"Saving model to [{save_location}]")
-        with open(save_location, "wb") as model_file:
-            pickle.dump(artifact, model_file)
-
-    return artifact
+    """Train the final selected OvR UKCAT model on all labelled data."""
+    model_config = _get_selected_model_config(best_config, "ovr")
+    return _train_ukcat_ovr_artifact(
+        sample_files=sample_files,
+        fields=tuple(model_config["fields"]),
+        save_location=save_location,
+        n_jobs=n_jobs,
+        clean_text=bool(model_config["clean_text"]),
+        ngram_max=int(model_config["ngram_max"]),
+        threshold=float(model_config["threshold"]),
+        top_k_fallback=int(model_config["top_k_fallback"]),
+        model_type="ukcat_ovr",
+        extra_metadata={
+            "selected_by": model_config["selected_by"],
+            "best_config_path": best_config,
+        },
+    )
 
 
 @click.command()

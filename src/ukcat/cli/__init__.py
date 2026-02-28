@@ -3,14 +3,22 @@ from dotenv import load_dotenv
 
 from ukcat.__about__ import __version__
 from ukcat.apply_icnptso import apply_icnptso
+from ukcat.apply_ukcat_hybrid import apply_ukcat_hybrid
+from ukcat.apply_ukcat_ovr import apply_ukcat_ovr
 from ukcat.apply_ukcat import apply_ukcat
-from ukcat.evaluate import evaluate_icnptso, evaluate_ukcat
+from ukcat.evaluate_workflow import (
+    evaluate_dev_grid,
+    evaluate_final_holdout,
+    evaluate_make_split,
+    evaluate_run_full_workflow,
+)
 from ukcat.fetch_charities import fetch_charities
 from ukcat.fetch_sample import fetch_sample
 from ukcat.fetch_tags import fetch_tags
 from ukcat.make_docs import make_ukcat_docs
+from ukcat.ml_ukcat_hybrid_model import create_ukcat_hybrid_model
 from ukcat.ml_icnptso import create_ml_model
-from ukcat.ml_ukcat_ovr import create_ukcat_ovr_model, evaluate_ukcat_ovr
+from ukcat.ml_ukcat_ovr import create_ukcat_ovr_model
 
 load_dotenv()
 
@@ -36,7 +44,9 @@ def apply():
     pass
 
 
-apply.add_command(apply_ukcat, name="ukcat")
+apply.add_command(apply_ukcat, name="ukcat-regex")
+apply.add_command(apply_ukcat_ovr, name="ukcat-ovr")
+apply.add_command(apply_ukcat_hybrid, name="ukcat-hybrid")
 apply.add_command(apply_icnptso, name="icnptso")
 
 
@@ -47,6 +57,7 @@ def train():
 
 train.add_command(create_ml_model, name="icnptso")
 train.add_command(create_ukcat_ovr_model, name="ukcat-ovr")
+train.add_command(create_ukcat_hybrid_model, name="ukcat-hybrid")
 
 
 @ukcat.group("docs")
@@ -62,6 +73,7 @@ def evaluate():
     pass
 
 
-evaluate.add_command(evaluate_icnptso, name="icnptso")
-evaluate.add_command(evaluate_ukcat, name="ukcat")
-evaluate.add_command(evaluate_ukcat_ovr, name="ukcat-ovr")
+evaluate.add_command(evaluate_make_split)
+evaluate.add_command(evaluate_dev_grid)
+evaluate.add_command(evaluate_final_holdout)
+evaluate.add_command(evaluate_run_full_workflow)
