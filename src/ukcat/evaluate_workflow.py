@@ -156,6 +156,7 @@ def _run_dev_grid(
     n_jobs: int,
     clean_mode: str,
     random_state: int | None = None,
+    quiet: bool = False,
 ) -> dict[str, Any]:
     _check_exists(DEFAULT_DEV_FILE, "Dev split")
     parser = grid._build_parser()
@@ -165,6 +166,7 @@ def _run_dev_grid(
     args.n_jobs = n_jobs
     args.clean_text_mode = clean_mode
     args.random_state = random_state
+    args.quiet = quiet
 
     selected = grid._resolve_selected_approaches_from_knobs()
     args.optimise_metric = grid._resolve_optimise_metric_from_knobs()
@@ -392,10 +394,23 @@ def evaluate_make_split(random_state: int, final_test_size: float) -> None:
     show_default=True,
 )
 @click.option("--random-state", default=None, type=int)
+@click.option("--quiet", is_flag=True, help="Suppress per-parameter progress lines during grid evaluation.")
 @click.option("--n-jobs", default=DEFAULT_N_JOBS, type=int, show_default=True)
-def evaluate_dev_grid(show_top: int, clean_text_mode: str, random_state: int | None, n_jobs: int) -> None:
+def evaluate_dev_grid(
+    show_top: int,
+    clean_text_mode: str,
+    random_state: int | None,
+    quiet: bool,
+    n_jobs: int,
+) -> None:
     """Run the dev-only grid search on the fixed dev split."""
-    _run_dev_grid(show_top=show_top, n_jobs=n_jobs, clean_mode=clean_text_mode, random_state=random_state)
+    _run_dev_grid(
+        show_top=show_top,
+        n_jobs=n_jobs,
+        clean_mode=clean_text_mode,
+        random_state=random_state,
+        quiet=quiet,
+    )
 
 
 @click.command("final-holdout")
@@ -414,8 +429,15 @@ def evaluate_final_holdout(n_jobs: int) -> None:
     show_default=True,
 )
 @click.option("--random-state", default=None, type=int)
+@click.option("--quiet", is_flag=True, help="Suppress per-parameter progress lines during grid evaluation.")
 @click.option("--n-jobs", default=DEFAULT_N_JOBS, type=int, show_default=True)
-def evaluate_run_full_workflow(show_top: int, clean_text_mode: str, random_state: int | None, n_jobs: int) -> None:
+def evaluate_run_full_workflow(
+    show_top: int,
+    clean_text_mode: str,
+    random_state: int | None,
+    quiet: bool,
+    n_jobs: int,
+) -> None:
     """Run dev-grid and then locked final-holdout using the saved best config."""
     _check_exists(DEFAULT_DEV_FILE, "Dev split")
     _check_exists(DEFAULT_TEST_FILE, "Final test split")
@@ -424,6 +446,7 @@ def evaluate_run_full_workflow(show_top: int, clean_text_mode: str, random_state
         n_jobs=n_jobs,
         clean_mode=clean_text_mode,
         random_state=random_state,
+        quiet=quiet,
     )
     click.echo("")
     _run_final_holdout(n_jobs=n_jobs)

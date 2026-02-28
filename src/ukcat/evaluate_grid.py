@@ -38,7 +38,7 @@ DEFAULT_RANDOM_STATES = (67, 2026, 42, 123, 321)
 DEFAULT_THRESHOLDS = (0.04, 0.05, 0.06, 0.10, 0.2, 0.25, 0.3)
 DEFAULT_NGRAM_MAX_VALUES = (1, 2, 3)
 DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
-DEFAULT_CLEAN_TEXT_MODE = "compare" # can also be set to 'on' or 'off'
+DEFAULT_CLEAN_TEXT_MODE = "on" # can be set to 'on', 'off' or 'compare'
 DEFAULT_FIELD_SETS = (
     ("name", "activities"),
     #("name", "activities", "objects"), # Commented out as objects consistently harms performance
@@ -250,6 +250,11 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="Print the top N parameter combinations (0 disables). In dual mode this is applied to each model.",
+    )
+    parser.add_argument(
+        "--quiet",
+        action="store_true",
+        help="Suppress per-parameter progress lines during grid evaluation.",
     )
     parser.add_argument(
         "--save-summary",
@@ -619,7 +624,7 @@ def _print_run_header(
 ) -> None:
     print(f"Loading labelled data from: {', '.join(sample_files)}")
     print(f"Loaded labelled rows: {labelled_rows:,}")
-    print(f"Random states: {list(random_states)}")
+    print(f"Random state(s): {list(random_states)}")
     print(f"Grid combinations: {grid_count}")
     print(f"Total grid evaluations: {grid_count * len(random_states)}")
     if optimise_metric == "weighted_primary":
@@ -687,13 +692,14 @@ def _run_grid_for_states(
         # Conservative cache: reuse only artefacts affected by model training.
         ovr_cache: dict[tuple, tuple[pd.DataFrame, pd.Series]] = {}
         for idx, gp in enumerate(grid_params, start=1):
-            print(
-                f"  [{idx}/{len(grid_params)}] fields={','.join(gp.fields)}, "
-                f"clean_text={'on' if gp.clean_text else 'off'}, threshold={gp.threshold:.3f}, "
-                f"ngram_max={gp.ngram_max}, top_k_fallback={gp.top_k_fallback}"
-                f", hybrid_label_confidence_threshold="
-                f"{_fmt_hybrid_conf(gp.hybrid_label_confidence_threshold, hybrid_conf_precision)}"
-            )
+            if not getattr(args, "quiet", False):
+                print(
+                    f"  [{idx}/{len(grid_params)}] fields={','.join(gp.fields)}, "
+                    f"clean_text={'on' if gp.clean_text else 'off'}, threshold={gp.threshold:.3f}, "
+                    f"ngram_max={gp.ngram_max}, top_k_fallback={gp.top_k_fallback}"
+                    f", hybrid_label_confidence_threshold="
+                    f"{_fmt_hybrid_conf(gp.hybrid_label_confidence_threshold, hybrid_conf_precision)}"
+                )
             ovr_probability_df, true_codes_by_org = _get_cached_ovr_artifacts(
                 train_df=train_df,
                 test_df=test_df,
@@ -780,7 +786,7 @@ def _print_results(
     _print_comparison_metrics(merged_best)
     print(
         f"\nNote: Best OVR and best Hybrid combinations were selected independently "
-        f"(each ranked by `{args.optimise_metric}`) and averaged across {len(random_states)} random states."
+        f"(each ranked by `{args.optimise_metric}`) and averaged across {len(random_states)} random state(s)."
     )
     print("Best OVR parameter combination")
     _print_best_params(
