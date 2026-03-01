@@ -42,7 +42,7 @@ def combine_hybrid_predictions(
 
     Expected inputs:
     - ovr_eval_df / regex_eval_df columns: org_id, true_codes, predicted_codes
-    - ovr_probability_df index: org_id, columns: UKCAT codes, values: probabilities
+    - ovr_probability_df index: org_id, columns: UKCAT codes, values: OvR label scores
     """
     if rule not in HYBRID_RULE_CHOICES:
         raise ValueError(f"Unsupported hybrid rule: {rule}")

@@ -8,6 +8,7 @@ from typing import Sequence
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from tqdm.auto import tqdm
 
 from ukcat.evaluate import (
     _evaluate_ukcat_ovr_rows_with_scores,
@@ -20,6 +21,7 @@ from ukcat.ml_ukcat_hybrid import (
     HYBRID_RULE_LABEL_CONF_GATED_REGEX,
     combine_hybrid_predictions,
 )
+from ukcat.ml_ukcat_ovr import SGD_LOSS_CHOICES
 
 # Evaluation model notes:
 # - Regex is the hand-written baseline and emits UK-CAT codes directly from text rules.
@@ -35,18 +37,67 @@ from ukcat.ml_ukcat_hybrid import (
 # Grid defaults: use sequences for sweeps or single values for fixed runs.
 DEFAULT_SAMPLE_FILES = ("data/sample.csv", "data/top2000.csv")
 DEFAULT_RANDOM_STATES = (67, 2026, 42, 123, 321)
-DEFAULT_THRESHOLDS = (0.04, 0.05, 0.06, 0.10, 0.2, 0.25, 0.3)
-DEFAULT_NGRAM_MAX_VALUES = (1, 2, 3)
-DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+
+OVR_LOGISTIC_DEFAULT_THRESHOLDS = (0.10, 0.20, 0.30, 0.35, 0.40)
+OVR_LOGISTIC_DEFAULT_NGRAM_MAX_VALUES = (1, 2)
+OVR_LOGISTIC_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
+OVR_LOGISTIC_DEFAULT_C_VALUES = (10.0, 20.0, 30.0)
+OVR_LOGISTIC_DEFAULT_CLASS_WEIGHT_MODES = ("balanced",) # balanced and/or none
+OVR_LOGISTIC_DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+
+OVR_SVC_DEFAULT_THRESHOLDS = (-0.75, -0.50, -0.25)
+OVR_SVC_DEFAULT_NGRAM_MAX_VALUES = (1, 2)
+OVR_SVC_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
+OVR_SVC_DEFAULT_C_VALUES = (0.3, 1.0, 2.0, 3.0)
+OVR_SVC_DEFAULT_CLASS_WEIGHT_MODES = ("balanced", "none")
+OVR_SVC_DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+
+OVR_SGD_DEFAULT_THRESHOLDS = (0.22, 0.25, 0.275, 0.30, 0.325)
+OVR_SGD_DEFAULT_NGRAM_MAX_VALUES = (2,)
+OVR_SGD_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
+OVR_SGD_DEFAULT_LOSSES = ("modified_huber",)
+OVR_SGD_DEFAULT_ALPHA_VALUES = (0.0002, 0.0003, 0.0004, 0.0005, 0.00075)
+OVR_SGD_DEFAULT_CLASS_WEIGHT_MODES = ("none",)
+OVR_SGD_DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+
+HYBRID_LOGISTIC_DEFAULT_THRESHOLDS = (0.125, 0.15, 0.20, 0.25)
+HYBRID_LOGISTIC_DEFAULT_NGRAM_MAX_VALUES = (1, 2)
+HYBRID_LOGISTIC_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
+HYBRID_LOGISTIC_DEFAULT_C_VALUES = (2500, 3000, 3500, 4000)
+HYBRID_LOGISTIC_DEFAULT_CLASS_WEIGHT_MODES = ("none",) # balanced and/or none
+HYBRID_LOGISTIC_DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+HYBRID_LOGISTIC_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS = (0.00002, 0.00003, 0.00004, 0.00005, 0.000075)
+
+HYBRID_SVC_DEFAULT_THRESHOLDS = (-0.4, -0.3, -0.2, -0.1, 0.0)
+HYBRID_SVC_DEFAULT_NGRAM_MAX_VALUES = (2, )
+HYBRID_SVC_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
+HYBRID_SVC_DEFAULT_C_VALUES = (0.3, 0.5, 1.0)
+HYBRID_SVC_DEFAULT_CLASS_WEIGHT_MODES = ("balanced", )
+HYBRID_SVC_DEFAULT_TOP_K_FALLBACK_VALUES = (1, )
+HYBRID_SVC_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS = (0.125, 0.25, 0.35)
+
+HYBRID_SGD_DEFAULT_THRESHOLDS = (0.24, 0.25, 0.26, 0.275, 0.29, 0.30, 0.325)
+HYBRID_SGD_DEFAULT_NGRAM_MAX_VALUES = (2,)
+HYBRID_SGD_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 4, 5, 6, 7)
+HYBRID_SGD_DEFAULT_LOSSES = ("log_loss",)
+HYBRID_SGD_DEFAULT_ALPHA_VALUES = (0.000003, 0.000005, 0.0000075, 0.00001, 0.000015, 0.00002)
+HYBRID_SGD_DEFAULT_CLASS_WEIGHT_MODES = ("none",)
+HYBRID_SGD_DEFAULT_TOP_K_FALLBACK_VALUES = (0,)
+HYBRID_SGD_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS = (0.005, 0.0075, 0.01, 0.0125, 0.015, 0.02)
 DEFAULT_CLEAN_TEXT_MODE = "on" # can be set to 'on', 'off' or 'compare'
 DEFAULT_FIELD_SETS = (
     ("name", "activities"),
     #("name", "activities", "objects"), # Commented out as objects consistently harms performance
 )
-DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLDS = (0.00005, 0.0001, 0.0002, 0.0003, 0.0004, 0.001)
-
-DEFAULT_SELECT_BEST_OVR = True
-DEFAULT_SELECT_BEST_HYBRID = True
+# Top-level model toggles. These control both which approaches are searched and
+# which approaches are displayed in comparison output.
+DEFAULT_ENABLE_REGEX = True
+DEFAULT_ENABLE_OVR_LOGISTIC = True
+DEFAULT_ENABLE_OVR_SVC = False
+DEFAULT_ENABLE_OVR_SGD = True
+DEFAULT_ENABLE_HYBRID_LOGISTIC = True
+DEFAULT_ENABLE_HYBRID_SVC = False
+DEFAULT_ENABLE_HYBRID_SGD = True
 
 DEFAULT_OPTIMISE_PRECISION_MICRO = False
 DEFAULT_OPTIMISE_RECALL_MICRO = False
@@ -71,9 +122,10 @@ OPTIMISATION_METRICS = tuple(metric for metric, _, _ in OPTIMISATION_METRIC_SPEC
 
 # Weighted objective coefficients used when DEFAULT_OPTIMISE_WEIGHTED_PRIMARY is True.
 # Keep these non-negative and summing to 1.0.
-WEIGHTED_PRIMARY_F1_MICRO = 0.40
+WEIGHTED_PRIMARY_F1_MICRO = 0.35
 WEIGHTED_PRIMARY_F1_MACRO = 0.40
-WEIGHTED_PRIMARY_RECALL_MICRO = 0.20
+WEIGHTED_PRIMARY_RECALL_MICRO = 0.15
+WEIGHTED_PRIMARY_PRECISION_MICRO = 0.10
 
 # Optional uardrails (applied to the candidate approach being ranked: OVR and/or Hybrid)
 # Setting to 0 essentially turns that guardrail 'off'
@@ -84,19 +136,39 @@ GUARDRAIL_MAX_HAMMING_LOSS_EXCLUSIVE = 0.0160
 GUARDRAIL_MIN_JACCARD_SAMPLES = 0.0
 
 DISPLAY_METRICS = OPTIMISATION_METRICS
-APPROACHES = ("regex", "ovr", "hybrid")
+ALL_APPROACHES = ("regex", "ovr_logistic", "ovr_svc", "ovr_sgd", "hybrid_logistic", "hybrid_svc", "hybrid_sgd")
+APPROACHES = tuple(
+    approach
+    for approach, enabled in (
+        ("regex", DEFAULT_ENABLE_REGEX),
+        ("ovr_logistic", DEFAULT_ENABLE_OVR_LOGISTIC),
+        ("ovr_svc", DEFAULT_ENABLE_OVR_SVC),
+        ("ovr_sgd", DEFAULT_ENABLE_OVR_SGD),
+        ("hybrid_logistic", DEFAULT_ENABLE_HYBRID_LOGISTIC),
+        ("hybrid_svc", DEFAULT_ENABLE_HYBRID_SVC),
+        ("hybrid_sgd", DEFAULT_ENABLE_HYBRID_SGD),
+    )
+    if enabled
+)
 BASE_METRICS = ("rows",) + OPTIMISATION_METRICS
 GRID_GROUP_COLUMNS = (
+    "grid_approach",
     "fields_key",
     "clean_text",
+    "model_family",
     "threshold",
     "ngram_max",
+    "char_ngram_max",
+    "model_c",
+    "sgd_loss",
+    "sgd_alpha",
+    "class_weight_mode",
     "top_k_fallback",
     "hybrid_label_confidence_threshold",
 )
 AGGREGATED_METRIC_COLUMNS = tuple(
     f"{approach}_{metric}"
-    for approach in APPROACHES
+    for approach in ALL_APPROACHES
     for metric in BASE_METRICS
 )
 GUARDRAIL_SPECS = (
@@ -113,10 +185,17 @@ FieldSet = tuple[str, ...]
 
 @dataclass(frozen=True)
 class GridParams:
+    grid_approach: str
     fields: tuple[str, ...]
     clean_text: bool
+    model_family: str
     threshold: float
     ngram_max: int
+    char_ngram_max: int
+    model_c: float
+    sgd_loss: str
+    sgd_alpha: float
+    class_weight_mode: str
     top_k_fallback: int
     hybrid_label_confidence_threshold: float
 
@@ -169,48 +248,340 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Single random state override (use instead of --random-states).",
     )
     parser.add_argument(
-        "--thresholds",
-        default=",".join(_parse_csv_list(DEFAULT_THRESHOLDS)),
-        help="Comma-separated OvR thresholds to test.",
+        "--ovr-logistic-thresholds",
+        default=",".join(_parse_csv_list(OVR_LOGISTIC_DEFAULT_THRESHOLDS)),
+        help="Comma-separated OVR logistic thresholds to test.",
     )
     parser.add_argument(
-        "--threshold",
+        "--ovr-logistic-threshold",
         type=float,
         default=None,
-        help="Single threshold override (use instead of --thresholds).",
+        help="Single OVR logistic threshold override.",
     )
     parser.add_argument(
-        "--ngram-max-values",
-        default=",".join(_parse_csv_list(DEFAULT_NGRAM_MAX_VALUES)),
-        help="Comma-separated maximum n-gram sizes (uses 1..N).",
+        "--ovr-logistic-ngram-max-values",
+        default=",".join(_parse_csv_list(OVR_LOGISTIC_DEFAULT_NGRAM_MAX_VALUES)),
+        help="Comma-separated OVR logistic maximum n-gram sizes (uses 1..N).",
     )
     parser.add_argument(
-        "--ngram-max",
+        "--ovr-logistic-ngram-max",
         type=int,
         default=None,
-        help="Single n-gram max override (use instead of --ngram-max-values).",
+        help="Single OVR logistic n-gram max override.",
     )
     parser.add_argument(
-        "--top-k-fallback-values",
-        default=",".join(_parse_csv_list(DEFAULT_TOP_K_FALLBACK_VALUES)),
-        help="Comma-separated fallback values (0 disables fallback).",
+        "--ovr-logistic-char-ngram-max-values",
+        default=",".join(_parse_csv_list(OVR_LOGISTIC_DEFAULT_CHAR_NGRAM_MAX_VALUES)),
+        help="Comma-separated OVR logistic maximum char_wb n-gram sizes (0 disables char features).",
     )
     parser.add_argument(
-        "--top-k-fallback",
+        "--ovr-logistic-char-ngram-max",
         type=int,
         default=None,
-        help="Single top-k fallback override (use instead of --top-k-fallback-values).",
+        help="Single OVR logistic char_wb n-gram max override.",
     )
     parser.add_argument(
-        "--hybrid-label-confidence-threshold-values",
-        default=",".join(_parse_csv_list(DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLDS)),
-        help="Comma-separated label confidence thresholds for label_conf_gated_regex.",
+        "--ovr-logistic-c-values",
+        default=",".join(_parse_csv_list(OVR_LOGISTIC_DEFAULT_C_VALUES)),
+        help="Comma-separated OVR LogisticRegression C values to test.",
+    )
+    parser.add_argument("--ovr-logistic-c", type=float, default=None, help="Single OVR LogisticRegression C override.")
+    parser.add_argument(
+        "--ovr-class-weight-modes",
+        default=",".join(_parse_csv_list(OVR_LOGISTIC_DEFAULT_CLASS_WEIGHT_MODES)),
+        help="Comma-separated OVR logistic class-weight modes to test (none, balanced).",
     )
     parser.add_argument(
-        "--hybrid-label-confidence-threshold",
+        "--ovr-class-weight-mode",
+        choices=("none", "balanced"),
+        default=None,
+        help="Single OVR logistic class-weight mode override.",
+    )
+    parser.add_argument(
+        "--ovr-top-k-fallback-values",
+        default=",".join(_parse_csv_list(OVR_LOGISTIC_DEFAULT_TOP_K_FALLBACK_VALUES)),
+        help="Comma-separated OVR logistic fallback values (0 disables fallback).",
+    )
+    parser.add_argument(
+        "--ovr-top-k-fallback",
+        type=int,
+        default=None,
+        help="Single OVR logistic top-k fallback override.",
+    )
+    parser.add_argument(
+        "--ovr-svc-thresholds",
+        default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_THRESHOLDS)),
+        help="Comma-separated OVR LinearSVC decision thresholds to test.",
+    )
+    parser.add_argument("--ovr-svc-threshold", type=float, default=None, help="Single OVR SVC threshold override.")
+    parser.add_argument(
+        "--ovr-svc-ngram-max-values",
+        default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_NGRAM_MAX_VALUES)),
+        help="Comma-separated OVR SVC maximum n-gram sizes (uses 1..N).",
+    )
+    parser.add_argument("--ovr-svc-ngram-max", type=int, default=None, help="Single OVR SVC n-gram max override.")
+    parser.add_argument(
+        "--ovr-svc-char-ngram-max-values",
+        default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_CHAR_NGRAM_MAX_VALUES)),
+        help="Comma-separated OVR SVC maximum char_wb n-gram sizes (0 disables char features).",
+    )
+    parser.add_argument("--ovr-svc-char-ngram-max", type=int, default=None, help="Single OVR SVC char_wb n-gram max override.")
+    parser.add_argument(
+        "--ovr-svc-c-values",
+        default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_C_VALUES)),
+        help="Comma-separated OVR LinearSVC C values to test.",
+    )
+    parser.add_argument("--ovr-svc-c", type=float, default=None, help="Single OVR LinearSVC C override.")
+    parser.add_argument(
+        "--ovr-svc-class-weight-modes",
+        default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_CLASS_WEIGHT_MODES)),
+        help="Comma-separated OVR SVC class-weight modes to test (none, balanced).",
+    )
+    parser.add_argument(
+        "--ovr-svc-class-weight-mode",
+        choices=("none", "balanced"),
+        default=None,
+        help="Single OVR SVC class-weight mode override.",
+    )
+    parser.add_argument(
+        "--ovr-svc-top-k-fallback-values",
+        default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_TOP_K_FALLBACK_VALUES)),
+        help="Comma-separated OVR SVC fallback values (0 disables fallback).",
+    )
+    parser.add_argument("--ovr-svc-top-k-fallback", type=int, default=None, help="Single OVR SVC top-k fallback override.")
+    parser.add_argument(
+        "--ovr-sgd-thresholds",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_THRESHOLDS)),
+        help="Comma-separated OVR SGD thresholds to test.",
+    )
+    parser.add_argument("--ovr-sgd-threshold", type=float, default=None, help="Single OVR SGD threshold override.")
+    parser.add_argument(
+        "--ovr-sgd-ngram-max-values",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_NGRAM_MAX_VALUES)),
+        help="Comma-separated OVR SGD maximum n-gram sizes (uses 1..N).",
+    )
+    parser.add_argument("--ovr-sgd-ngram-max", type=int, default=None, help="Single OVR SGD n-gram max override.")
+    parser.add_argument(
+        "--ovr-sgd-char-ngram-max-values",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_CHAR_NGRAM_MAX_VALUES)),
+        help="Comma-separated OVR SGD maximum char_wb n-gram sizes (0 disables char features).",
+    )
+    parser.add_argument("--ovr-sgd-char-ngram-max", type=int, default=None, help="Single OVR SGD char_wb n-gram max override.")
+    parser.add_argument(
+        "--ovr-sgd-losses",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_LOSSES)),
+        help="Comma-separated OVR SGD losses to test.",
+    )
+    parser.add_argument(
+        "--ovr-sgd-loss",
+        choices=SGD_LOSS_CHOICES,
+        default=None,
+        help="Single OVR SGD loss override.",
+    )
+    parser.add_argument(
+        "--ovr-sgd-alpha-values",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_ALPHA_VALUES)),
+        help="Comma-separated OVR SGD alpha values to test.",
+    )
+    parser.add_argument("--ovr-sgd-alpha", type=float, default=None, help="Single OVR SGD alpha override.")
+    parser.add_argument(
+        "--ovr-sgd-class-weight-modes",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_CLASS_WEIGHT_MODES)),
+        help="Comma-separated OVR SGD class-weight modes to test (none, balanced).",
+    )
+    parser.add_argument(
+        "--ovr-sgd-class-weight-mode",
+        choices=("none", "balanced"),
+        default=None,
+        help="Single OVR SGD class-weight mode override.",
+    )
+    parser.add_argument(
+        "--ovr-sgd-top-k-fallback-values",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_TOP_K_FALLBACK_VALUES)),
+        help="Comma-separated OVR SGD fallback values (0 disables fallback).",
+    )
+    parser.add_argument("--ovr-sgd-top-k-fallback", type=int, default=None, help="Single OVR SGD top-k fallback override.")
+    parser.add_argument(
+        "--hybrid-logistic-thresholds",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_THRESHOLDS)),
+        help="Comma-separated hybrid logistic thresholds to test.",
+    )
+    parser.add_argument("--hybrid-logistic-threshold", type=float, default=None, help="Single hybrid logistic threshold override.")
+    parser.add_argument(
+        "--hybrid-logistic-ngram-max-values",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_NGRAM_MAX_VALUES)),
+        help="Comma-separated hybrid logistic maximum n-gram sizes (uses 1..N).",
+    )
+    parser.add_argument("--hybrid-logistic-ngram-max", type=int, default=None, help="Single hybrid logistic n-gram max override.")
+    parser.add_argument(
+        "--hybrid-logistic-char-ngram-max-values",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_CHAR_NGRAM_MAX_VALUES)),
+        help="Comma-separated hybrid logistic maximum char_wb n-gram sizes (0 disables char features).",
+    )
+    parser.add_argument("--hybrid-logistic-char-ngram-max", type=int, default=None, help="Single hybrid logistic char_wb n-gram max override.")
+    parser.add_argument(
+        "--hybrid-logistic-c-values",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_C_VALUES)),
+        help="Comma-separated hybrid logistic C values to test.",
+    )
+    parser.add_argument("--hybrid-logistic-c", type=float, default=None, help="Single hybrid logistic C override.")
+    parser.add_argument(
+        "--hybrid-logistic-class-weight-modes",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_CLASS_WEIGHT_MODES)),
+        help="Comma-separated hybrid logistic class-weight modes to test (none, balanced).",
+    )
+    parser.add_argument(
+        "--hybrid-logistic-class-weight-mode",
+        choices=("none", "balanced"),
+        default=None,
+        help="Single hybrid logistic class-weight mode override.",
+    )
+    parser.add_argument(
+        "--hybrid-logistic-top-k-fallback-values",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_TOP_K_FALLBACK_VALUES)),
+        help="Comma-separated hybrid logistic fallback values (0 disables fallback).",
+    )
+    parser.add_argument(
+        "--hybrid-logistic-top-k-fallback",
+        type=int,
+        default=None,
+        help="Single hybrid logistic top-k fallback override.",
+    )
+    parser.add_argument(
+        "--hybrid-logistic-label-confidence-threshold-values",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS)),
+        help="Comma-separated hybrid logistic label confidence thresholds for label_conf_gated_regex.",
+    )
+    parser.add_argument(
+        "--hybrid-logistic-label-confidence-threshold",
         type=float,
         default=None,
-        help="Single hybrid label confidence threshold override.",
+        help="Single hybrid logistic label confidence threshold override.",
+    )
+    parser.add_argument(
+        "--hybrid-svc-thresholds",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_THRESHOLDS)),
+        help="Comma-separated hybrid SVC thresholds to test.",
+    )
+    parser.add_argument("--hybrid-svc-threshold", type=float, default=None, help="Single hybrid SVC threshold override.")
+    parser.add_argument(
+        "--hybrid-svc-ngram-max-values",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_NGRAM_MAX_VALUES)),
+        help="Comma-separated hybrid SVC maximum n-gram sizes (uses 1..N).",
+    )
+    parser.add_argument("--hybrid-svc-ngram-max", type=int, default=None, help="Single hybrid SVC n-gram max override.")
+    parser.add_argument(
+        "--hybrid-svc-char-ngram-max-values",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_CHAR_NGRAM_MAX_VALUES)),
+        help="Comma-separated hybrid SVC maximum char_wb n-gram sizes (0 disables char features).",
+    )
+    parser.add_argument("--hybrid-svc-char-ngram-max", type=int, default=None, help="Single hybrid SVC char_wb n-gram max override.")
+    parser.add_argument(
+        "--hybrid-svc-c-values",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_C_VALUES)),
+        help="Comma-separated hybrid SVC C values to test.",
+    )
+    parser.add_argument("--hybrid-svc-c", type=float, default=None, help="Single hybrid SVC C override.")
+    parser.add_argument(
+        "--hybrid-svc-class-weight-modes",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_CLASS_WEIGHT_MODES)),
+        help="Comma-separated hybrid SVC class-weight modes to test (none, balanced).",
+    )
+    parser.add_argument(
+        "--hybrid-svc-class-weight-mode",
+        choices=("none", "balanced"),
+        default=None,
+        help="Single hybrid SVC class-weight mode override.",
+    )
+    parser.add_argument(
+        "--hybrid-svc-top-k-fallback-values",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_TOP_K_FALLBACK_VALUES)),
+        help="Comma-separated hybrid SVC fallback values (0 disables fallback).",
+    )
+    parser.add_argument(
+        "--hybrid-svc-top-k-fallback",
+        type=int,
+        default=None,
+        help="Single hybrid SVC top-k fallback override.",
+    )
+    parser.add_argument(
+        "--hybrid-svc-label-confidence-threshold-values",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS)),
+        help="Comma-separated hybrid SVC label confidence thresholds for label_conf_gated_regex.",
+    )
+    parser.add_argument(
+        "--hybrid-svc-label-confidence-threshold",
+        type=float,
+        default=None,
+        help="Single hybrid SVC label confidence threshold override.",
+    )
+    parser.add_argument(
+        "--hybrid-sgd-thresholds",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_THRESHOLDS)),
+        help="Comma-separated hybrid SGD thresholds to test.",
+    )
+    parser.add_argument("--hybrid-sgd-threshold", type=float, default=None, help="Single hybrid SGD threshold override.")
+    parser.add_argument(
+        "--hybrid-sgd-ngram-max-values",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_NGRAM_MAX_VALUES)),
+        help="Comma-separated hybrid SGD maximum n-gram sizes (uses 1..N).",
+    )
+    parser.add_argument("--hybrid-sgd-ngram-max", type=int, default=None, help="Single hybrid SGD n-gram max override.")
+    parser.add_argument(
+        "--hybrid-sgd-char-ngram-max-values",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_CHAR_NGRAM_MAX_VALUES)),
+        help="Comma-separated hybrid SGD maximum char_wb n-gram sizes (0 disables char features).",
+    )
+    parser.add_argument("--hybrid-sgd-char-ngram-max", type=int, default=None, help="Single hybrid SGD char_wb n-gram max override.")
+    parser.add_argument(
+        "--hybrid-sgd-losses",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_LOSSES)),
+        help="Comma-separated hybrid SGD losses to test.",
+    )
+    parser.add_argument(
+        "--hybrid-sgd-loss",
+        choices=SGD_LOSS_CHOICES,
+        default=None,
+        help="Single hybrid SGD loss override.",
+    )
+    parser.add_argument(
+        "--hybrid-sgd-alpha-values",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_ALPHA_VALUES)),
+        help="Comma-separated hybrid SGD alpha values to test.",
+    )
+    parser.add_argument("--hybrid-sgd-alpha", type=float, default=None, help="Single hybrid SGD alpha override.")
+    parser.add_argument(
+        "--hybrid-sgd-class-weight-modes",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_CLASS_WEIGHT_MODES)),
+        help="Comma-separated hybrid SGD class-weight modes to test (none, balanced).",
+    )
+    parser.add_argument(
+        "--hybrid-sgd-class-weight-mode",
+        choices=("none", "balanced"),
+        default=None,
+        help="Single hybrid SGD class-weight mode override.",
+    )
+    parser.add_argument(
+        "--hybrid-sgd-top-k-fallback-values",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_TOP_K_FALLBACK_VALUES)),
+        help="Comma-separated hybrid SGD fallback values (0 disables fallback).",
+    )
+    parser.add_argument(
+        "--hybrid-sgd-top-k-fallback",
+        type=int,
+        default=None,
+        help="Single hybrid SGD top-k fallback override.",
+    )
+    parser.add_argument(
+        "--hybrid-sgd-label-confidence-threshold-values",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS)),
+        help="Comma-separated hybrid SGD label confidence thresholds for label_conf_gated_regex.",
+    )
+    parser.add_argument(
+        "--hybrid-sgd-label-confidence-threshold",
+        type=float,
+        default=None,
+        help="Single hybrid SGD label confidence threshold override.",
     )
     parser.add_argument("--test-size", type=float, default=0.2, help="Holdout test fraction.")
     parser.add_argument(
@@ -252,9 +623,9 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print the top N parameter combinations (0 disables). In dual mode this is applied to each model.",
     )
     parser.add_argument(
-        "--quiet",
+        "--verbose",
         action="store_true",
-        help="Suppress per-parameter progress lines during grid evaluation.",
+        help="Print each parameter combination during grid evaluation instead of using a progress bar.",
     )
     parser.add_argument(
         "--save-summary",
@@ -283,14 +654,20 @@ def _resolve_optimise_metric_from_knobs() -> str:
 
 def _resolve_selected_approaches_from_knobs() -> list[str]:
     selected_knobs = {
-        "ovr": DEFAULT_SELECT_BEST_OVR,
-        "hybrid": DEFAULT_SELECT_BEST_HYBRID,
+        "ovr_logistic": DEFAULT_ENABLE_OVR_LOGISTIC,
+        "ovr_svc": DEFAULT_ENABLE_OVR_SVC,
+        "ovr_sgd": DEFAULT_ENABLE_OVR_SGD,
+        "hybrid_logistic": DEFAULT_ENABLE_HYBRID_LOGISTIC,
+        "hybrid_svc": DEFAULT_ENABLE_HYBRID_SVC,
+        "hybrid_sgd": DEFAULT_ENABLE_HYBRID_SGD,
     }
     selected = [name for name, enabled in selected_knobs.items() if enabled]
     if not selected:
         raise SystemExit(
             "At least one model selection knob must be True: "
-            "DEFAULT_SELECT_BEST_OVR and/or DEFAULT_SELECT_BEST_HYBRID."
+            "DEFAULT_ENABLE_OVR_LOGISTIC, DEFAULT_ENABLE_OVR_SVC, "
+            "DEFAULT_ENABLE_OVR_SGD, DEFAULT_ENABLE_HYBRID_LOGISTIC, "
+            "DEFAULT_ENABLE_HYBRID_SVC, and/or DEFAULT_ENABLE_HYBRID_SGD."
         )
     return selected
 
@@ -327,12 +704,20 @@ def _decimal_places(token: str) -> int:
 
 def _resolve_hybrid_conf_precision(args: argparse.Namespace) -> int:
     precision = 0
-    raw_values = getattr(args, "hybrid_label_confidence_threshold_values", "")
-    if isinstance(raw_values, str) and raw_values.strip():
-        precision = max(_decimal_places(part) for part in raw_values.split(",") if part.strip())
-    single_value = getattr(args, "hybrid_label_confidence_threshold", None)
-    if single_value is not None:
-        precision = max(precision, _decimal_places(str(single_value)))
+    for raw_values in (
+        getattr(args, "hybrid_logistic_label_confidence_threshold_values", ""),
+        getattr(args, "hybrid_svc_label_confidence_threshold_values", ""),
+        getattr(args, "hybrid_sgd_label_confidence_threshold_values", ""),
+    ):
+        if isinstance(raw_values, str) and raw_values.strip():
+            precision = max(precision, max(_decimal_places(part) for part in raw_values.split(",") if part.strip()))
+    for single_value in (
+        getattr(args, "hybrid_logistic_label_confidence_threshold", None),
+        getattr(args, "hybrid_svc_label_confidence_threshold", None),
+        getattr(args, "hybrid_sgd_label_confidence_threshold", None),
+    ):
+        if single_value is not None:
+            precision = max(precision, _decimal_places(str(single_value)))
     return max(4, precision)
 
 
@@ -340,17 +725,33 @@ def _fmt_hybrid_conf(value: float, precision: int) -> str:
     return f"{value:.{precision}f}"
 
 
-def _weighted_primary(f1_micro: float, f1_macro: float, recall_micro: float) -> float:
+def _weighted_primary(
+    f1_micro: float,
+    f1_macro: float,
+    recall_micro: float,
+    precision_micro: float,
+) -> float:
     return (
         WEIGHTED_PRIMARY_F1_MICRO * f1_micro
         + WEIGHTED_PRIMARY_F1_MACRO * f1_macro
         + WEIGHTED_PRIMARY_RECALL_MICRO * recall_micro
+        + WEIGHTED_PRIMARY_PRECISION_MICRO * precision_micro
     )
 
 
 def _validate_weighted_primary_weights() -> None:
-    total = WEIGHTED_PRIMARY_F1_MICRO + WEIGHTED_PRIMARY_F1_MACRO + WEIGHTED_PRIMARY_RECALL_MICRO
-    if min(WEIGHTED_PRIMARY_F1_MICRO, WEIGHTED_PRIMARY_F1_MACRO, WEIGHTED_PRIMARY_RECALL_MICRO) < 0:
+    total = (
+        WEIGHTED_PRIMARY_F1_MICRO
+        + WEIGHTED_PRIMARY_F1_MACRO
+        + WEIGHTED_PRIMARY_RECALL_MICRO
+        + WEIGHTED_PRIMARY_PRECISION_MICRO
+    )
+    if min(
+        WEIGHTED_PRIMARY_F1_MICRO,
+        WEIGHTED_PRIMARY_F1_MACRO,
+        WEIGHTED_PRIMARY_RECALL_MICRO,
+        WEIGHTED_PRIMARY_PRECISION_MICRO,
+    ) < 0:
         raise SystemExit("Weighted objective coefficients must be non-negative.")
     if abs(total - 1.0) > 1e-9:
         raise SystemExit(
@@ -436,28 +837,57 @@ def _score_pair(
     # - regex labels, which encode strong hand-written rules
     # - OvR scores, which capture softer statistical evidence from text
     # and combines them into one final prediction set.
-    hybrid_eval_df = combine_hybrid_predictions(
-        ovr_eval_df=ovr_eval_df,
-        regex_eval_df=regex_eval_df,
-        ovr_probability_df=ovr_probability_df,
-        rule=hybrid_rule,
-        label_confidence_threshold=params.hybrid_label_confidence_threshold,
-    )
     pure_ovr_metrics = _score_ukcat_multilabel(ovr_eval_df)
-    hybrid_metrics = _score_ukcat_multilabel(hybrid_eval_df)
+    ovr_logistic_metrics = {metric: float("nan") for metric in BASE_METRICS}
+    ovr_svc_metrics = {metric: float("nan") for metric in BASE_METRICS}
+    ovr_sgd_metrics = {metric: float("nan") for metric in BASE_METRICS}
+    if params.grid_approach == "ovr_logistic":
+        ovr_logistic_metrics = pure_ovr_metrics
+    elif params.grid_approach == "ovr_svc":
+        ovr_svc_metrics = pure_ovr_metrics
+    elif params.grid_approach == "ovr_sgd":
+        ovr_sgd_metrics = pure_ovr_metrics
+    hybrid_logistic_metrics = {metric: float("nan") for metric in BASE_METRICS}
+    hybrid_svc_metrics = {metric: float("nan") for metric in BASE_METRICS}
+    hybrid_sgd_metrics = {metric: float("nan") for metric in BASE_METRICS}
+    if params.grid_approach in {"hybrid_logistic", "hybrid_svc", "hybrid_sgd"}:
+        hybrid_eval_df = combine_hybrid_predictions(
+            ovr_eval_df=ovr_eval_df,
+            regex_eval_df=regex_eval_df,
+            ovr_probability_df=ovr_probability_df,
+            rule=hybrid_rule,
+            label_confidence_threshold=params.hybrid_label_confidence_threshold,
+        )
+        if params.grid_approach == "hybrid_logistic":
+            hybrid_logistic_metrics = _score_ukcat_multilabel(hybrid_eval_df)
+        elif params.grid_approach == "hybrid_svc":
+            hybrid_svc_metrics = _score_ukcat_multilabel(hybrid_eval_df)
+        else:
+            hybrid_sgd_metrics = _score_ukcat_multilabel(hybrid_eval_df)
 
     row = {
+        "grid_approach": params.grid_approach,
         "fields_key": ",".join(params.fields),
         "clean_text": params.clean_text,
+        "model_family": params.model_family,
         "threshold": params.threshold,
         "ngram_max": params.ngram_max,
+        "char_ngram_max": params.char_ngram_max,
+        "model_c": params.model_c,
+        "sgd_loss": params.sgd_loss,
+        "sgd_alpha": params.sgd_alpha,
+        "class_weight_mode": params.class_weight_mode,
         "top_k_fallback": params.top_k_fallback,
         "hybrid_label_confidence_threshold": params.hybrid_label_confidence_threshold,
     }
     for approach, metrics in (
         ("regex", regex_metrics),
-        ("ovr", pure_ovr_metrics),
-        ("hybrid", hybrid_metrics),
+        ("ovr_logistic", ovr_logistic_metrics),
+        ("ovr_svc", ovr_svc_metrics),
+        ("ovr_sgd", ovr_sgd_metrics),
+        ("hybrid_logistic", hybrid_logistic_metrics),
+        ("hybrid_svc", hybrid_svc_metrics),
+        ("hybrid_sgd", hybrid_sgd_metrics),
     ):
         for key, value in metrics.items():
             row[f"{approach}_{key}"] = value
@@ -465,53 +895,318 @@ def _score_pair(
         f1_micro=float(row["regex_f1_micro"]),
         f1_macro=float(row["regex_f1_macro"]),
         recall_micro=float(row["regex_recall_micro"]),
+        precision_micro=float(row["regex_precision_micro"]),
     )
-    row["ovr_weighted_primary"] = _weighted_primary(
-        f1_micro=float(row["ovr_f1_micro"]),
-        f1_macro=float(row["ovr_f1_macro"]),
-        recall_micro=float(row["ovr_recall_micro"]),
+    row["ovr_logistic_weighted_primary"] = (
+        _weighted_primary(
+            f1_micro=float(row["ovr_logistic_f1_micro"]),
+            f1_macro=float(row["ovr_logistic_f1_macro"]),
+            recall_micro=float(row["ovr_logistic_recall_micro"]),
+            precision_micro=float(row["ovr_logistic_precision_micro"]),
+        )
+        if params.grid_approach == "ovr_logistic"
+        else float("nan")
     )
-    row["hybrid_weighted_primary"] = _weighted_primary(
-        f1_micro=float(row["hybrid_f1_micro"]),
-        f1_macro=float(row["hybrid_f1_macro"]),
-        recall_micro=float(row["hybrid_recall_micro"]),
+    row["ovr_svc_weighted_primary"] = (
+        _weighted_primary(
+            f1_micro=float(row["ovr_svc_f1_micro"]),
+            f1_macro=float(row["ovr_svc_f1_macro"]),
+            recall_micro=float(row["ovr_svc_recall_micro"]),
+            precision_micro=float(row["ovr_svc_precision_micro"]),
+        )
+        if params.grid_approach == "ovr_svc"
+        else float("nan")
+    )
+    row["ovr_sgd_weighted_primary"] = (
+        _weighted_primary(
+            f1_micro=float(row["ovr_sgd_f1_micro"]),
+            f1_macro=float(row["ovr_sgd_f1_macro"]),
+            recall_micro=float(row["ovr_sgd_recall_micro"]),
+            precision_micro=float(row["ovr_sgd_precision_micro"]),
+        )
+        if params.grid_approach == "ovr_sgd"
+        else float("nan")
+    )
+    row["hybrid_logistic_weighted_primary"] = (
+        _weighted_primary(
+            f1_micro=float(row["hybrid_logistic_f1_micro"]),
+            f1_macro=float(row["hybrid_logistic_f1_macro"]),
+            recall_micro=float(row["hybrid_logistic_recall_micro"]),
+            precision_micro=float(row["hybrid_logistic_precision_micro"]),
+        )
+        if params.grid_approach == "hybrid_logistic"
+        else float("nan")
+    )
+    row["hybrid_svc_weighted_primary"] = (
+        _weighted_primary(
+            f1_micro=float(row["hybrid_svc_f1_micro"]),
+            f1_macro=float(row["hybrid_svc_f1_macro"]),
+            recall_micro=float(row["hybrid_svc_recall_micro"]),
+            precision_micro=float(row["hybrid_svc_precision_micro"]),
+        )
+        if params.grid_approach == "hybrid_svc"
+        else float("nan")
+    )
+    row["hybrid_sgd_weighted_primary"] = (
+        _weighted_primary(
+            f1_micro=float(row["hybrid_sgd_f1_micro"]),
+            f1_macro=float(row["hybrid_sgd_f1_macro"]),
+            recall_micro=float(row["hybrid_sgd_recall_micro"]),
+            precision_micro=float(row["hybrid_sgd_precision_micro"]),
+        )
+        if params.grid_approach == "hybrid_sgd"
+        else float("nan")
     )
 
     return row
 
 
-def _grid(params: argparse.Namespace, field_sets: Sequence[FieldSet]) -> list[GridParams]:
-    clean_values = _clean_values(params.clean_text_mode)
-    thresholds = [params.threshold] if params.threshold is not None else _parse_float_csv(params.thresholds)
-    ngram_max_values = [params.ngram_max] if params.ngram_max is not None else _parse_int_csv(params.ngram_max_values)
-    top_k_values = (
-        [params.top_k_fallback]
-        if params.top_k_fallback is not None
-        else _parse_int_csv(params.top_k_fallback_values)
-    )
-    hybrid_label_conf_values = (
-        [params.hybrid_label_confidence_threshold]
-        if params.hybrid_label_confidence_threshold is not None
-        else _parse_float_csv(params.hybrid_label_confidence_threshold_values)
-    )
+def _build_grid(
+    *,
+    approach: str,
+    field_sets: Sequence[FieldSet],
+    clean_values: Sequence[bool],
+    model_family: str,
+    thresholds: Sequence[float],
+    ngram_max_values: Sequence[int],
+    char_ngram_max_values: Sequence[int],
+    model_c_values: Sequence[float],
+    sgd_loss_values: Sequence[str],
+    sgd_alpha_values: Sequence[float],
+    class_weight_modes: Sequence[str],
+    top_k_values: Sequence[int],
+    hybrid_label_conf_values: Sequence[float],
+) -> list[GridParams]:
     return [
         GridParams(
+            grid_approach=approach,
             fields=field_set,
             clean_text=clean_text,
+            model_family=model_family,
             threshold=t,
             ngram_max=n,
+            char_ngram_max=char_n,
+            model_c=c,
+            sgd_loss=sgd_loss,
+            sgd_alpha=sgd_alpha,
+            class_weight_mode=class_weight_mode,
             top_k_fallback=k,
             hybrid_label_confidence_threshold=h,
         )
-        for field_set, clean_text, t, n, k, h in product(
+        for field_set, clean_text, t, n, char_n, c, sgd_loss, sgd_alpha, class_weight_mode, k, h in product(
             field_sets,
             clean_values,
             thresholds,
             ngram_max_values,
+            char_ngram_max_values,
+            model_c_values,
+            sgd_loss_values,
+            sgd_alpha_values,
+            class_weight_modes,
             top_k_values,
             hybrid_label_conf_values,
         )
     ]
+
+
+def _grid(
+    params: argparse.Namespace,
+    field_sets: Sequence[FieldSet],
+    selected_approaches: Sequence[str],
+) -> list[GridParams]:
+    clean_values = _clean_values(params.clean_text_mode)
+    grid_params: list[GridParams] = []
+    if "ovr_logistic" in selected_approaches:
+        grid_params.extend(
+            _build_grid(
+                approach="ovr_logistic",
+                field_sets=field_sets,
+                clean_values=clean_values,
+                model_family="logistic",
+                thresholds=[params.ovr_logistic_threshold]
+                if params.ovr_logistic_threshold is not None
+                else _parse_float_csv(params.ovr_logistic_thresholds),
+                ngram_max_values=[params.ovr_logistic_ngram_max]
+                if params.ovr_logistic_ngram_max is not None
+                else _parse_int_csv(params.ovr_logistic_ngram_max_values),
+                char_ngram_max_values=[params.ovr_logistic_char_ngram_max]
+                if params.ovr_logistic_char_ngram_max is not None
+                else _parse_int_csv(params.ovr_logistic_char_ngram_max_values),
+                model_c_values=[params.ovr_logistic_c]
+                if params.ovr_logistic_c is not None
+                else _parse_float_csv(params.ovr_logistic_c_values),
+                sgd_loss_values=[""],
+                sgd_alpha_values=[-1.0],
+                class_weight_modes=[params.ovr_class_weight_mode]
+                if params.ovr_class_weight_mode is not None
+                else _parse_csv_list(params.ovr_class_weight_modes),
+                top_k_values=[params.ovr_top_k_fallback]
+                if params.ovr_top_k_fallback is not None
+                else _parse_int_csv(params.ovr_top_k_fallback_values),
+                hybrid_label_conf_values=[-1.0],
+            )
+        )
+    if "ovr_svc" in selected_approaches:
+        grid_params.extend(
+            _build_grid(
+                approach="ovr_svc",
+                field_sets=field_sets,
+                clean_values=clean_values,
+                model_family="linear_svc",
+                thresholds=[params.ovr_svc_threshold]
+                if params.ovr_svc_threshold is not None
+                else _parse_float_csv(params.ovr_svc_thresholds),
+                ngram_max_values=[params.ovr_svc_ngram_max]
+                if params.ovr_svc_ngram_max is not None
+                else _parse_int_csv(params.ovr_svc_ngram_max_values),
+                char_ngram_max_values=[params.ovr_svc_char_ngram_max]
+                if params.ovr_svc_char_ngram_max is not None
+                else _parse_int_csv(params.ovr_svc_char_ngram_max_values),
+                model_c_values=[params.ovr_svc_c]
+                if params.ovr_svc_c is not None
+                else _parse_float_csv(params.ovr_svc_c_values),
+                sgd_loss_values=[""],
+                sgd_alpha_values=[-1.0],
+                class_weight_modes=[params.ovr_svc_class_weight_mode]
+                if params.ovr_svc_class_weight_mode is not None
+                else _parse_csv_list(params.ovr_svc_class_weight_modes),
+                top_k_values=[params.ovr_svc_top_k_fallback]
+                if params.ovr_svc_top_k_fallback is not None
+                else _parse_int_csv(params.ovr_svc_top_k_fallback_values),
+                hybrid_label_conf_values=[-1.0],
+            )
+        )
+    if "ovr_sgd" in selected_approaches:
+        grid_params.extend(
+            _build_grid(
+                approach="ovr_sgd",
+                field_sets=field_sets,
+                clean_values=clean_values,
+                model_family="sgd",
+                thresholds=[params.ovr_sgd_threshold]
+                if params.ovr_sgd_threshold is not None
+                else _parse_float_csv(params.ovr_sgd_thresholds),
+                ngram_max_values=[params.ovr_sgd_ngram_max]
+                if params.ovr_sgd_ngram_max is not None
+                else _parse_int_csv(params.ovr_sgd_ngram_max_values),
+                char_ngram_max_values=[params.ovr_sgd_char_ngram_max]
+                if params.ovr_sgd_char_ngram_max is not None
+                else _parse_int_csv(params.ovr_sgd_char_ngram_max_values),
+                model_c_values=[-1.0],
+                sgd_loss_values=[params.ovr_sgd_loss]
+                if params.ovr_sgd_loss is not None
+                else _parse_csv_list(params.ovr_sgd_losses),
+                sgd_alpha_values=[params.ovr_sgd_alpha]
+                if params.ovr_sgd_alpha is not None
+                else _parse_float_csv(params.ovr_sgd_alpha_values),
+                class_weight_modes=[params.ovr_sgd_class_weight_mode]
+                if params.ovr_sgd_class_weight_mode is not None
+                else _parse_csv_list(params.ovr_sgd_class_weight_modes),
+                top_k_values=[params.ovr_sgd_top_k_fallback]
+                if params.ovr_sgd_top_k_fallback is not None
+                else _parse_int_csv(params.ovr_sgd_top_k_fallback_values),
+                hybrid_label_conf_values=[-1.0],
+            )
+        )
+    if "hybrid_logistic" in selected_approaches:
+        grid_params.extend(
+            _build_grid(
+                approach="hybrid_logistic",
+                field_sets=field_sets,
+                clean_values=clean_values,
+                model_family="logistic",
+                thresholds=[params.hybrid_logistic_threshold]
+                if params.hybrid_logistic_threshold is not None
+                else _parse_float_csv(params.hybrid_logistic_thresholds),
+                ngram_max_values=[params.hybrid_logistic_ngram_max]
+                if params.hybrid_logistic_ngram_max is not None
+                else _parse_int_csv(params.hybrid_logistic_ngram_max_values),
+                char_ngram_max_values=[params.hybrid_logistic_char_ngram_max]
+                if params.hybrid_logistic_char_ngram_max is not None
+                else _parse_int_csv(params.hybrid_logistic_char_ngram_max_values),
+                model_c_values=[params.hybrid_logistic_c]
+                if params.hybrid_logistic_c is not None
+                else _parse_float_csv(params.hybrid_logistic_c_values),
+                sgd_loss_values=[""],
+                sgd_alpha_values=[-1.0],
+                class_weight_modes=[params.hybrid_logistic_class_weight_mode]
+                if params.hybrid_logistic_class_weight_mode is not None
+                else _parse_csv_list(params.hybrid_logistic_class_weight_modes),
+                top_k_values=[params.hybrid_logistic_top_k_fallback]
+                if params.hybrid_logistic_top_k_fallback is not None
+                else _parse_int_csv(params.hybrid_logistic_top_k_fallback_values),
+                hybrid_label_conf_values=[params.hybrid_logistic_label_confidence_threshold]
+                if params.hybrid_logistic_label_confidence_threshold is not None
+                else _parse_float_csv(params.hybrid_logistic_label_confidence_threshold_values),
+            )
+        )
+    if "hybrid_svc" in selected_approaches:
+        grid_params.extend(
+            _build_grid(
+                approach="hybrid_svc",
+                field_sets=field_sets,
+                clean_values=clean_values,
+                model_family="linear_svc",
+                thresholds=[params.hybrid_svc_threshold]
+                if params.hybrid_svc_threshold is not None
+                else _parse_float_csv(params.hybrid_svc_thresholds),
+                ngram_max_values=[params.hybrid_svc_ngram_max]
+                if params.hybrid_svc_ngram_max is not None
+                else _parse_int_csv(params.hybrid_svc_ngram_max_values),
+                char_ngram_max_values=[params.hybrid_svc_char_ngram_max]
+                if params.hybrid_svc_char_ngram_max is not None
+                else _parse_int_csv(params.hybrid_svc_char_ngram_max_values),
+                model_c_values=[params.hybrid_svc_c]
+                if params.hybrid_svc_c is not None
+                else _parse_float_csv(params.hybrid_svc_c_values),
+                sgd_loss_values=[""],
+                sgd_alpha_values=[-1.0],
+                class_weight_modes=[params.hybrid_svc_class_weight_mode]
+                if params.hybrid_svc_class_weight_mode is not None
+                else _parse_csv_list(params.hybrid_svc_class_weight_modes),
+                top_k_values=[params.hybrid_svc_top_k_fallback]
+                if params.hybrid_svc_top_k_fallback is not None
+                else _parse_int_csv(params.hybrid_svc_top_k_fallback_values),
+                hybrid_label_conf_values=[params.hybrid_svc_label_confidence_threshold]
+                if params.hybrid_svc_label_confidence_threshold is not None
+                else _parse_float_csv(params.hybrid_svc_label_confidence_threshold_values),
+            )
+        )
+    if "hybrid_sgd" in selected_approaches:
+        grid_params.extend(
+            _build_grid(
+                approach="hybrid_sgd",
+                field_sets=field_sets,
+                clean_values=clean_values,
+                model_family="sgd",
+                thresholds=[params.hybrid_sgd_threshold]
+                if params.hybrid_sgd_threshold is not None
+                else _parse_float_csv(params.hybrid_sgd_thresholds),
+                ngram_max_values=[params.hybrid_sgd_ngram_max]
+                if params.hybrid_sgd_ngram_max is not None
+                else _parse_int_csv(params.hybrid_sgd_ngram_max_values),
+                char_ngram_max_values=[params.hybrid_sgd_char_ngram_max]
+                if params.hybrid_sgd_char_ngram_max is not None
+                else _parse_int_csv(params.hybrid_sgd_char_ngram_max_values),
+                model_c_values=[-1.0],
+                sgd_loss_values=[params.hybrid_sgd_loss]
+                if params.hybrid_sgd_loss is not None
+                else _parse_csv_list(params.hybrid_sgd_losses),
+                sgd_alpha_values=[params.hybrid_sgd_alpha]
+                if params.hybrid_sgd_alpha is not None
+                else _parse_float_csv(params.hybrid_sgd_alpha_values),
+                class_weight_modes=[params.hybrid_sgd_class_weight_mode]
+                if params.hybrid_sgd_class_weight_mode is not None
+                else _parse_csv_list(params.hybrid_sgd_class_weight_modes),
+                top_k_values=[params.hybrid_sgd_top_k_fallback]
+                if params.hybrid_sgd_top_k_fallback is not None
+                else _parse_int_csv(params.hybrid_sgd_top_k_fallback_values),
+                hybrid_label_conf_values=[params.hybrid_sgd_label_confidence_threshold]
+                if params.hybrid_sgd_label_confidence_threshold is not None
+                else _parse_float_csv(params.hybrid_sgd_label_confidence_threshold_values),
+            )
+        )
+    return grid_params
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -525,6 +1220,59 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise SystemExit(f"Invalid optimise metric: {getattr(args, 'optimise_metric', None)}")
     if args.clean_text_mode not in {"off", "on", "compare"}:
         raise SystemExit("--clean-text-mode must be one of: off, on, compare")
+    for label, single_value, values_text in (
+        ("ovr-logistic", args.ovr_logistic_c, args.ovr_logistic_c_values),
+        ("ovr-svc", args.ovr_svc_c, args.ovr_svc_c_values),
+        ("hybrid-logistic", args.hybrid_logistic_c, args.hybrid_logistic_c_values),
+        ("hybrid-svc", args.hybrid_svc_c, args.hybrid_svc_c_values),
+    ):
+        if single_value is not None and single_value <= 0:
+            raise SystemExit(f"--{label}-c must be greater than 0")
+        values = [single_value] if single_value is not None else _parse_float_csv(values_text)
+        if any(value <= 0 for value in values):
+            raise SystemExit(f"All --{label}-c-values entries must be greater than 0")
+    for label, single_mode, values_text in (
+        ("ovr-logistic", args.ovr_class_weight_mode, args.ovr_class_weight_modes),
+        ("ovr-svc", args.ovr_svc_class_weight_mode, args.ovr_svc_class_weight_modes),
+        ("ovr-sgd", args.ovr_sgd_class_weight_mode, args.ovr_sgd_class_weight_modes),
+        (
+            "hybrid-logistic",
+            args.hybrid_logistic_class_weight_mode,
+            args.hybrid_logistic_class_weight_modes,
+        ),
+        ("hybrid-svc", args.hybrid_svc_class_weight_mode, args.hybrid_svc_class_weight_modes),
+        ("hybrid-sgd", args.hybrid_sgd_class_weight_mode, args.hybrid_sgd_class_weight_modes),
+    ):
+        modes = [single_mode] if single_mode is not None else _parse_csv_list(values_text)
+        if any(mode not in {"none", "balanced"} for mode in modes):
+            raise SystemExit(f"{label.upper()} class-weight modes must be drawn from: none, balanced")
+    for label, single_value, values_text in (
+        ("ovr-logistic", args.ovr_logistic_char_ngram_max, args.ovr_logistic_char_ngram_max_values),
+        ("ovr-svc", args.ovr_svc_char_ngram_max, args.ovr_svc_char_ngram_max_values),
+        ("ovr-sgd", args.ovr_sgd_char_ngram_max, args.ovr_sgd_char_ngram_max_values),
+        ("hybrid-logistic", args.hybrid_logistic_char_ngram_max, args.hybrid_logistic_char_ngram_max_values),
+        ("hybrid-svc", args.hybrid_svc_char_ngram_max, args.hybrid_svc_char_ngram_max_values),
+        ("hybrid-sgd", args.hybrid_sgd_char_ngram_max, args.hybrid_sgd_char_ngram_max_values),
+    ):
+        values = [single_value] if single_value is not None else _parse_int_csv(values_text)
+        if any(value not in {0} and value < 3 for value in values):
+            raise SystemExit(f"All --{label}-char-ngram-max-values entries must be 0 or at least 3")
+    for label, single_loss, values_text in (
+        ("ovr-sgd", args.ovr_sgd_loss, args.ovr_sgd_losses),
+        ("hybrid-sgd", args.hybrid_sgd_loss, args.hybrid_sgd_losses),
+    ):
+        losses = [single_loss] if single_loss is not None else _parse_csv_list(values_text)
+        if any(loss not in SGD_LOSS_CHOICES for loss in losses):
+            raise SystemExit(f"{label.upper()} losses must be drawn from: {', '.join(SGD_LOSS_CHOICES)}")
+    for label, single_value, values_text in (
+        ("ovr-sgd", args.ovr_sgd_alpha, args.ovr_sgd_alpha_values),
+        ("hybrid-sgd", args.hybrid_sgd_alpha, args.hybrid_sgd_alpha_values),
+    ):
+        if single_value is not None and single_value <= 0:
+            raise SystemExit(f"--{label}-alpha must be greater than 0")
+        values = [single_value] if single_value is not None else _parse_float_csv(values_text)
+        if any(value <= 0 for value in values):
+            raise SystemExit(f"All --{label}-alpha-values entries must be greater than 0")
     if args.optimise_metric == "weighted_primary":
         _validate_weighted_primary_weights()
 
@@ -537,13 +1285,16 @@ def _clean_values(mode: str) -> list[bool]:
     return [False, True]
 
 
-def _resolve_inputs(args: argparse.Namespace) -> tuple[tuple[str, ...], list[int], list[GridParams]]:
+def _resolve_inputs(
+    args: argparse.Namespace,
+    selected_approaches: Sequence[str],
+) -> tuple[tuple[str, ...], list[int], list[GridParams]]:
     sample_files = tuple(args.sample_files) if args.sample_files else DEFAULT_SAMPLE_FILES
     random_states = [args.random_state] if args.random_state is not None else _parse_int_csv(args.random_states)
     field_sets = _parse_field_sets(args.fields)
     if any(len(field_set) == 0 for field_set in field_sets):
         raise SystemExit("Field sets must include at least one field")
-    grid_params = _grid(args, field_sets=field_sets)
+    grid_params = _grid(args, field_sets=field_sets, selected_approaches=selected_approaches)
     if not grid_params:
         raise SystemExit("No parameter combinations generated")
     return sample_files, random_states, grid_params
@@ -551,18 +1302,39 @@ def _resolve_inputs(args: argparse.Namespace) -> tuple[tuple[str, ...], list[int
 
 def _print_comparison_metrics(row: pd.Series) -> None:
     print("\nComparison metrics")
-    print(
-        f" - rows: regex={int(round(float(row['regex_rows_mean'])))} | "
-        f"ovr={int(round(float(row['ovr_rows_mean'])))} | "
-        f"hybrid={int(round(float(row['hybrid_rows_mean'])))}"
-    )
+    parts = [
+        f"{approach}={int(round(float(row[f'{approach}_rows_mean'])))}"
+        for approach in APPROACHES
+        if f"{approach}_rows_mean" in row.index
+    ]
+    print(" - rows: " + " | ".join(parts))
     for metric in DISPLAY_METRICS:
+        parts = [
+            f"{approach}={_fmt(float(row[f'{approach}_{metric}_mean']))}"
+            for approach in APPROACHES
+            if f"{approach}_{metric}_mean" in row.index
+        ]
+        print(f" - {metric}: " + " | ".join(parts))
+
+
+def _print_single_approach_metrics(row: pd.Series, approach: str) -> None:
+    print("\nComparison metrics")
+    if DEFAULT_ENABLE_REGEX:
         print(
-            f" - {metric}: "
-            f"regex={_fmt(float(row[f'regex_{metric}_mean']))} | "
-            f"ovr={_fmt(float(row[f'ovr_{metric}_mean']))} | "
-            f"hybrid={_fmt(float(row[f'hybrid_{metric}_mean']))}"
+            f" - rows: regex={int(round(float(row['regex_rows_mean'])))} | "
+            f"{approach}={int(round(float(row[f'{approach}_rows_mean'])))}"
         )
+    else:
+        print(f" - rows: {approach}={int(round(float(row[f'{approach}_rows_mean'])))}")
+    for metric in DISPLAY_METRICS:
+        if DEFAULT_ENABLE_REGEX:
+            print(
+                f" - {metric}: "
+                f"regex={_fmt(float(row[f'regex_{metric}_mean']))} | "
+                f"{approach}={_fmt(float(row[f'{approach}_{metric}_mean']))}"
+            )
+        else:
+            print(f" - {metric}: {approach}={_fmt(float(row[f'{approach}_{metric}_mean']))}")
 
 
 def _print_top_rows(
@@ -580,11 +1352,18 @@ def _print_top_rows(
         base = (
             f" - [{rank}] fields={row['fields_key']}, "
             f"clean_text={'on' if bool(row['clean_text']) else 'off'}, "
+            f"model_family={row['model_family']}, "
             f"threshold={row['threshold']:.3f}, "
             f"ngram_max={int(row['ngram_max'])}, "
+            f"char_ngram_max={int(row['char_ngram_max'])}, "
+            f"class_weight_mode={row['class_weight_mode']}, "
             f"top_k_fallback={int(row['top_k_fallback'])}"
         )
-        if approach == "hybrid":
+        if row["model_family"] == "sgd":
+            base += f", sgd_loss={row['sgd_loss']}, sgd_alpha={float(row['sgd_alpha']):g}"
+        else:
+            base += f", model_c={float(row['model_c']):g}"
+        if approach.startswith("hybrid"):
             base += (
                 ", hybrid_label_confidence_threshold="
                 f"{_fmt_hybrid_conf(float(row['hybrid_label_confidence_threshold']), hybrid_conf_precision)}"
@@ -603,8 +1382,16 @@ def _print_best_params(
         print(f" - selected by: {show_selected_by}")
     print(f" - fields: {best['fields_key']}")
     print(f" - clean_text: {'on' if bool(best['clean_text']) else 'off'}")
+    print(f" - model_family: {best['model_family']}")
     print(f" - threshold: {best['threshold']:.3f}")
     print(f" - ngram_max: {int(best['ngram_max'])}")
+    print(f" - char_ngram_max: {int(best['char_ngram_max'])}")
+    if best["model_family"] == "sgd":
+        print(f" - sgd_loss: {best['sgd_loss']}")
+        print(f" - sgd_alpha: {float(best['sgd_alpha']):g}")
+    else:
+        print(f" - model_c: {float(best['model_c']):g}")
+    print(f" - class_weight_mode: {best['class_weight_mode']}")
     print(f" - top_k_fallback: {int(best['top_k_fallback'])}")
     if include_hybrid:
         print(f" - hybrid_rule: {args.hybrid_rule}")
@@ -632,7 +1419,8 @@ def _print_run_header(
             "Weighted objective in use: "
             f"{WEIGHTED_PRIMARY_F1_MICRO:.3f}*F1_micro + "
             f"{WEIGHTED_PRIMARY_F1_MACRO:.3f}*F1_macro + "
-            f"{WEIGHTED_PRIMARY_RECALL_MICRO:.3f}*Recall_micro"
+            f"{WEIGHTED_PRIMARY_RECALL_MICRO:.3f}*Recall_micro + "
+            f"{WEIGHTED_PRIMARY_PRECISION_MICRO:.3f}*Precision_micro"
         )
     print(f"Clean text mode: {clean_mode}")
     print("")
@@ -645,7 +1433,18 @@ def _get_cached_ovr_artifacts(
     args: argparse.Namespace,
     ovr_cache: dict[tuple, tuple[pd.DataFrame, pd.Series]],
 ) -> tuple[pd.DataFrame, pd.Series]:
-    cache_key = (params.ngram_max, params.clean_text, tuple(params.fields), int(args.n_jobs))
+    cache_key = (
+        params.model_family,
+        params.ngram_max,
+        params.char_ngram_max,
+        params.clean_text,
+        params.model_c,
+        params.sgd_loss,
+        params.sgd_alpha,
+        params.class_weight_mode,
+        tuple(params.fields),
+        int(args.n_jobs),
+    )
     if cache_key not in ovr_cache:
         # Only the feature/training knobs require a fresh OvR fit. Thresholds and
         # hybrid gating are cheap when using cached probabilities
@@ -657,7 +1456,13 @@ def _get_cached_ovr_artifacts(
             top_k_fallback=0,
             n_jobs=args.n_jobs,
             ngram_max=params.ngram_max,
+            char_ngram_max=params.char_ngram_max,
             clean_text=params.clean_text,
+            model_family=params.model_family,
+            model_c=params.model_c,
+            class_weight_mode=params.class_weight_mode,
+            sgd_loss=params.sgd_loss or None,
+            sgd_alpha=None if params.sgd_alpha < 0 else params.sgd_alpha,
         )
         true_codes_by_org = seed_eval_df.set_index("org_id")["true_codes"].copy()
         true_codes_by_org.index = true_codes_by_org.index.astype(str)
@@ -691,15 +1496,33 @@ def _run_grid_for_states(
 
         # Conservative cache: reuse only artefacts affected by model training.
         ovr_cache: dict[tuple, tuple[pd.DataFrame, pd.Series]] = {}
-        for idx, gp in enumerate(grid_params, start=1):
-            if not getattr(args, "quiet", False):
-                print(
+        param_iterator = enumerate(grid_params, start=1)
+        if not getattr(args, "verbose", False):
+            param_iterator = tqdm(
+                param_iterator,
+                total=len(grid_params),
+                desc=f"state={state}",
+                leave=False,
+            )
+        for idx, gp in param_iterator:
+            if getattr(args, "verbose", False):
+                base = (
                     f"  [{idx}/{len(grid_params)}] fields={','.join(gp.fields)}, "
                     f"clean_text={'on' if gp.clean_text else 'off'}, threshold={gp.threshold:.3f}, "
-                    f"ngram_max={gp.ngram_max}, top_k_fallback={gp.top_k_fallback}"
-                    f", hybrid_label_confidence_threshold="
-                    f"{_fmt_hybrid_conf(gp.hybrid_label_confidence_threshold, hybrid_conf_precision)}"
+                    f"model_family={gp.model_family}, "
+                    f"ngram_max={gp.ngram_max}, char_ngram_max={gp.char_ngram_max}, "
+                    f"class_weight_mode={gp.class_weight_mode}, top_k_fallback={gp.top_k_fallback}"
                 )
+                if gp.model_family == "sgd":
+                    base += f", sgd_loss={gp.sgd_loss}, sgd_alpha={gp.sgd_alpha:g}"
+                else:
+                    base += f", model_c={gp.model_c:g}"
+                if gp.grid_approach.startswith("hybrid"):
+                    base += (
+                        f", hybrid_label_confidence_threshold="
+                        f"{_fmt_hybrid_conf(gp.hybrid_label_confidence_threshold, hybrid_conf_precision)}"
+                    )
+                print(base)
             ovr_probability_df, true_codes_by_org = _get_cached_ovr_artifacts(
                 train_df=train_df,
                 test_df=test_df,
@@ -746,14 +1569,17 @@ def _guardrail_message() -> str:
 
 
 def _select_ranked_summary(summary_df: pd.DataFrame, optimise_metric: str, approach: str) -> tuple[pd.DataFrame, str]:
+    summary_df = summary_df[summary_df["grid_approach"] == approach].copy()
+    if summary_df.empty:
+        raise SystemExit(f"No {approach.upper()} parameter combinations were generated.")
     if optimise_metric == "weighted_primary":
         # Weighted objective uses top-of-file coefficients.
         weighted_col = _candidate_column("weighted_primary", approach)
-        summary_df = summary_df.copy()
         summary_df.loc[:, weighted_col] = (
             WEIGHTED_PRIMARY_F1_MICRO * summary_df[_candidate_column("f1_micro", approach)]
             + WEIGHTED_PRIMARY_F1_MACRO * summary_df[_candidate_column("f1_macro", approach)]
             + WEIGHTED_PRIMARY_RECALL_MICRO * summary_df[_candidate_column("recall_micro", approach)]
+            + WEIGHTED_PRIMARY_PRECISION_MICRO * summary_df[_candidate_column("precision_micro", approach)]
         )
 
     sort_by = _candidate_column(optimise_metric, approach)
@@ -770,62 +1596,66 @@ def _select_ranked_summary(summary_df: pd.DataFrame, optimise_metric: str, appro
 
 
 def _print_results(
-    ovr_best: pd.Series,
-    ovr_summary_df: pd.DataFrame,
-    ovr_sort_by: str,
-    hybrid_best: pd.Series,
-    hybrid_summary_df: pd.DataFrame,
-    hybrid_sort_by: str,
+    selected_best: dict[str, pd.Series],
+    selected_summaries: dict[str, pd.DataFrame],
+    selected_sort_bys: dict[str, str],
     args: argparse.Namespace,
     random_states: Sequence[int],
 ) -> None:
     hybrid_conf_precision = _resolve_hybrid_conf_precision(args)
-    merged_best = ovr_best.copy()
-    for metric in DISPLAY_METRICS + ("rows",):
-        merged_best[f"hybrid_{metric}_mean"] = hybrid_best[f"hybrid_{metric}_mean"]
+    merged_best = (
+        selected_best["ovr_logistic"].copy()
+        if "ovr_logistic" in selected_best
+        else next(iter(selected_best.values())).copy()
+    )
+    for approach, best in selected_best.items():
+        if approach == "ovr_logistic":
+            continue
+        for metric in DISPLAY_METRICS + ("rows",):
+            merged_best[f"{approach}_{metric}_mean"] = best[f"{approach}_{metric}_mean"]
     _print_comparison_metrics(merged_best)
     print(
-        f"\nNote: Best OVR and best Hybrid combinations were selected independently "
+        f"\nNote: Best model combinations were selected independently "
         f"(each ranked by `{args.optimise_metric}`) and averaged across {len(random_states)} random state(s)."
     )
-    print("Best OVR parameter combination")
-    _print_best_params(
-        best=ovr_best,
-        args=args,
-        hybrid_conf_precision=hybrid_conf_precision,
-        include_hybrid=False,
-        show_selected_by=ovr_sort_by,
-    )
-
-    print("Best Hybrid parameter combination")
-    _print_best_params(
-        best=hybrid_best,
-        args=args,
-        hybrid_conf_precision=hybrid_conf_precision,
-        include_hybrid=True,
-        show_selected_by=hybrid_sort_by,
-    )
+    for approach in ("ovr_logistic", "ovr_svc", "ovr_sgd", "hybrid_logistic", "hybrid_svc", "hybrid_sgd"):
+        if approach not in selected_best:
+            continue
+        print(f"Best {approach.upper()} parameter combination")
+        _print_best_params(
+            best=selected_best[approach],
+            args=args,
+            hybrid_conf_precision=hybrid_conf_precision,
+            include_hybrid=approach.startswith("hybrid"),
+            show_selected_by=selected_sort_bys[approach],
+        )
 
     if args.show_top == 0:
         return
 
-    print(f"\nTop {args.show_top} OVR parameter combinations")
-    print(f" (ranked by {ovr_sort_by})")
-    _print_top_rows(
-        summary_df=ovr_summary_df,
-        show_top=args.show_top,
-        approach="ovr",
-        hybrid_conf_precision=hybrid_conf_precision,
-        dedupe_cols=("clean_text", "threshold", "ngram_max", "top_k_fallback"),
-    )
-    print(f"\nTop {args.show_top} Hybrid parameter combinations")
-    print(f" (ranked by {hybrid_sort_by})")
-    _print_top_rows(
-        summary_df=hybrid_summary_df,
-        show_top=args.show_top,
-        approach="hybrid",
-        hybrid_conf_precision=hybrid_conf_precision,
-    )
+    for approach in ("ovr_logistic", "ovr_svc", "ovr_sgd", "hybrid_logistic", "hybrid_svc", "hybrid_sgd"):
+        if approach not in selected_summaries:
+            continue
+        print(f"\nTop {args.show_top} {approach.upper()} parameter combinations")
+        print(f" (ranked by {selected_sort_bys[approach]})")
+        _print_top_rows(
+            summary_df=selected_summaries[approach],
+            show_top=args.show_top,
+            approach=approach,
+            hybrid_conf_precision=hybrid_conf_precision,
+            dedupe_cols=(
+                "clean_text",
+                "model_family",
+                "threshold",
+                "ngram_max",
+                "char_ngram_max",
+                "model_c",
+                "sgd_loss",
+                "sgd_alpha",
+                "class_weight_mode",
+                "top_k_fallback",
+            ) if not approach.startswith("hybrid") else None,
+        )
 
 
 def _print_single_results(
@@ -837,7 +1667,7 @@ def _print_single_results(
     random_states: Sequence[int],
 ) -> None:
     hybrid_conf_precision = _resolve_hybrid_conf_precision(args)
-    _print_comparison_metrics(best)
+    _print_single_approach_metrics(best, approach)
     print(
         f"\nNote: The best parameter combination was selected for "
         f"{approach.upper()} "
@@ -848,7 +1678,7 @@ def _print_single_results(
         best=best,
         args=args,
         hybrid_conf_precision=hybrid_conf_precision,
-        include_hybrid=(approach == "hybrid"),
+        include_hybrid=approach.startswith("hybrid"),
     )
 
     if args.show_top == 0:
@@ -884,7 +1714,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     selected_approaches = _resolve_selected_approaches_from_knobs()
     args.optimise_metric = _resolve_optimise_metric_from_knobs()
     _validate_args(args)
-    sample_files, random_states, grid_params = _resolve_inputs(args)
+    sample_files, random_states, grid_params = _resolve_inputs(args, selected_approaches=selected_approaches)
     labelled = _load_labelled_ukcat(sample_files)
     _print_run_header(
         sample_files=sample_files,
@@ -897,27 +1727,23 @@ def main(argv: Sequence[str] | None = None) -> None:
 
     per_state_df = _run_grid_for_states(labelled=labelled, random_states=random_states, grid_params=grid_params, args=args)
     summary_df = _aggregate_results(per_state_df)
-    if len(selected_approaches) == 2:
-        ovr_summary_df, ovr_sort_by = _select_ranked_summary(
-            summary_df=summary_df,
-            optimise_metric=args.optimise_metric,
-            approach="ovr",
-        )
-        hybrid_summary_df, hybrid_sort_by = _select_ranked_summary(
-            summary_df=summary_df,
-            optimise_metric=args.optimise_metric,
-            approach="hybrid",
-        )
-
-        ovr_best = ovr_summary_df.iloc[0]
-        hybrid_best = hybrid_summary_df.iloc[0]
+    if len(selected_approaches) > 1:
+        selected_summaries: dict[str, pd.DataFrame] = {}
+        selected_sort_bys: dict[str, str] = {}
+        selected_best: dict[str, pd.Series] = {}
+        for approach in selected_approaches:
+            summary, sort_by = _select_ranked_summary(
+                summary_df=summary_df,
+                optimise_metric=args.optimise_metric,
+                approach=approach,
+            )
+            selected_summaries[approach] = summary
+            selected_sort_bys[approach] = sort_by
+            selected_best[approach] = summary.iloc[0]
         _print_results(
-            ovr_best=ovr_best,
-            ovr_summary_df=ovr_summary_df,
-            ovr_sort_by=ovr_sort_by,
-            hybrid_best=hybrid_best,
-            hybrid_summary_df=hybrid_summary_df,
-            hybrid_sort_by=hybrid_sort_by,
+            selected_best=selected_best,
+            selected_summaries=selected_summaries,
+            selected_sort_bys=selected_sort_bys,
             args=args,
             random_states=random_states,
         )

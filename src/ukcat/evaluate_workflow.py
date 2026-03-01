@@ -38,7 +38,7 @@ FINAL_METRIC_ORDER = ("rows",) + grid.DISPLAY_METRICS
 # Workflow model notes:
 # - The saved OVR config describes how charity text is converted into one shared
 #   text model, then split into one binary classifier per UK-CAT code.
-# - The saved hybrid config points to that trained OVR model and adds only the
+# - The saved hybrid configs point to trained OVR-style models and add only the
 #   combination rule needed to merge OvR evidence with regex outputs.
 
 
@@ -70,6 +70,8 @@ def _weighted_primary_from_config(metrics: dict[str, float], config: dict[str, A
         micro_w * float(metrics["f1_micro"])
         + macro_w * float(metrics["f1_macro"])
         + recall_w * float(metrics["recall_micro"])
+        + float(weights.get("precision_micro", grid.WEIGHTED_PRIMARY_PRECISION_MICRO))
+        * float(metrics["precision_micro"])
     )
 
 
@@ -128,13 +130,23 @@ def _row_to_config(row: pd.Series, approach: str, args, sort_by: str) -> dict[st
         "approach": approach,
         "selected_by": sort_by,
         "fields": [part for part in str(row["fields_key"]).split(",") if part],
+        "model_family": str(row["model_family"]),
         "threshold": float(row["threshold"]),
         "ngram_max": int(row["ngram_max"]),
+        "char_ngram_max": int(row["char_ngram_max"]),
+        "model_c": float(row["model_c"]),
+        "class_weight_mode": str(row["class_weight_mode"]),
+        "sgd_loss": None if pd.isna(row["sgd_loss"]) or str(row["sgd_loss"]) == "" else str(row["sgd_loss"]),
+        "sgd_alpha": (
+            None
+            if pd.isna(row["sgd_alpha"]) or float(row["sgd_alpha"]) < 0
+            else float(row["sgd_alpha"])
+        ),
         "top_k_fallback": int(row["top_k_fallback"]),
         "clean_text": bool(row["clean_text"]),
         "include_groups": bool(args.include_groups),
     }
-    if approach == "hybrid":
+    if approach.startswith("hybrid"):
         config["hybrid_rule"] = args.hybrid_rule
         config["hybrid_conf"] = float(row["hybrid_label_confidence_threshold"])
     return config
@@ -156,7 +168,7 @@ def _run_dev_grid(
     n_jobs: int,
     clean_mode: str,
     random_state: int | None = None,
-    quiet: bool = False,
+    verbose: bool = False,
 ) -> dict[str, Any]:
     _check_exists(DEFAULT_DEV_FILE, "Dev split")
     parser = grid._build_parser()
@@ -166,13 +178,13 @@ def _run_dev_grid(
     args.n_jobs = n_jobs
     args.clean_text_mode = clean_mode
     args.random_state = random_state
-    args.quiet = quiet
+    args.verbose = verbose
 
     selected = grid._resolve_selected_approaches_from_knobs()
     args.optimise_metric = grid._resolve_optimise_metric_from_knobs()
     grid._validate_args(args)
 
-    sample_files, random_states, grid_params = grid._resolve_inputs(args)
+    sample_files, random_states, grid_params = grid._resolve_inputs(args, selected_approaches=selected)
     labelled = _load_labelled_ukcat(sample_files)
     grid._print_run_header(
         sample_files=sample_files,
@@ -201,37 +213,38 @@ def _run_dev_grid(
             "f1_micro": grid.WEIGHTED_PRIMARY_F1_MICRO,
             "f1_macro": grid.WEIGHTED_PRIMARY_F1_MACRO,
             "recall_micro": grid.WEIGHTED_PRIMARY_RECALL_MICRO,
+            "precision_micro": grid.WEIGHTED_PRIMARY_PRECISION_MICRO,
         },
         "random_states": list(random_states),
-        "ovr": None,
-        "hybrid": None,
+        "ovr_logistic": None,
+        "ovr_svc": None,
+        "ovr_sgd": None,
+        "hybrid_logistic": None,
+        "hybrid_svc": None,
+        "hybrid_sgd": None,
     }
 
-    if len(selected) == 2:
-        ovr_summary_df, ovr_sort_by = grid._select_ranked_summary(
-            summary_df=summary_df,
-            optimise_metric=args.optimise_metric,
-            approach="ovr",
-        )
-        hybrid_summary_df, hybrid_sort_by = grid._select_ranked_summary(
-            summary_df=summary_df,
-            optimise_metric=args.optimise_metric,
-            approach="hybrid",
-        )
-        ovr_best = ovr_summary_df.iloc[0]
-        hybrid_best = hybrid_summary_df.iloc[0]
+    if len(selected) > 1:
+        selected_summaries: dict[str, pd.DataFrame] = {}
+        selected_sort_bys: dict[str, str] = {}
+        selected_best: dict[str, pd.Series] = {}
+        for approach in selected:
+            summary, sort_by = grid._select_ranked_summary(
+                summary_df=summary_df,
+                optimise_metric=args.optimise_metric,
+                approach=approach,
+            )
+            selected_summaries[approach] = summary
+            selected_sort_bys[approach] = sort_by
+            selected_best[approach] = summary.iloc[0]
+            payload[approach] = _row_to_config(selected_best[approach], approach, args, sort_by)
         grid._print_results(
-            ovr_best=ovr_best,
-            ovr_summary_df=ovr_summary_df,
-            ovr_sort_by=ovr_sort_by,
-            hybrid_best=hybrid_best,
-            hybrid_summary_df=hybrid_summary_df,
-            hybrid_sort_by=hybrid_sort_by,
+            selected_best=selected_best,
+            selected_summaries=selected_summaries,
+            selected_sort_bys=selected_sort_bys,
             args=args,
             random_states=random_states,
         )
-        payload["ovr"] = _row_to_config(ovr_best, "ovr", args, ovr_sort_by)
-        payload["hybrid"] = _row_to_config(hybrid_best, "hybrid", args, hybrid_sort_by)
     else:
         approach = selected[0]
         best_df, sort_by = grid._select_ranked_summary(
@@ -285,7 +298,17 @@ def _build_ovr_artifacts(
         top_k_fallback=int(config["top_k_fallback"]),
         n_jobs=n_jobs,
         ngram_max=int(config["ngram_max"]),
+        char_ngram_max=int(config.get("char_ngram_max", 0)),
         clean_text=bool(config["clean_text"]),
+        model_family=str(config["model_family"]),
+        model_c=float(config["model_c"]),
+        class_weight_mode=str(config["class_weight_mode"]),
+        sgd_loss=config.get("sgd_loss"),
+        sgd_alpha=(
+            float(config["sgd_alpha"])
+            if config.get("sgd_alpha") is not None
+            else None
+        ),
     )
 
 
@@ -308,12 +331,30 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
     if overlap:
         raise click.ClickException("Dev and final test splits overlap on org_id. Final evaluation would leak.")
 
-    ovr_config = config.get("ovr")
-    hybrid_config = config.get("hybrid")
-    if ovr_config is None and hybrid_config is None:
-        raise click.ClickException("Best dev config does not contain OVR or Hybrid selections. Run `ukcat evaluate dev-grid` first.")
+    ovr_config = config.get("ovr_logistic")
+    ovr_svc_config = config.get("ovr_svc")
+    ovr_sgd_config = config.get("ovr_sgd")
+    hybrid_logistic_config = config.get("hybrid_logistic")
+    hybrid_svc_config = config.get("hybrid_svc")
+    hybrid_sgd_config = config.get("hybrid_sgd")
+    selected_configs = [
+        cfg
+        for cfg in (
+            ovr_config,
+            ovr_svc_config,
+            ovr_sgd_config,
+            hybrid_logistic_config,
+            hybrid_svc_config,
+            hybrid_sgd_config,
+        )
+        if cfg is not None
+    ]
+    if not selected_configs:
+        raise click.ClickException(
+            "Best dev config does not contain OVR_LOGISTIC, OVR_SVC, OVR_SGD, HYBRID_LOGISTIC, HYBRID_SVC, or HYBRID_SGD selections. Run `ukcat evaluate dev-grid` first."
+        )
 
-    include_groups = bool((hybrid_config or ovr_config)["include_groups"])
+    include_groups = bool(selected_configs[0]["include_groups"])
     click.echo(f"Loaded dev rows: {len(dev_df):,}")
     click.echo(f"Loaded final test rows: {len(test_df):,}")
 
@@ -325,15 +366,19 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
     # The final report always includes regex so the selected ML variants are
     # judged against the existing production-style baseline on exactly the same
     # holdout rows.
-    summary_rows: list[dict[str, Any]] = [
-        {"approach": "regex", **_metrics_with_weighted_primary(regex_eval_df, config)}
-    ]
+    summary_rows: list[dict[str, Any]] = []
+    if grid.DEFAULT_ENABLE_REGEX:
+        summary_rows.append({"approach": "regex", **_metrics_with_weighted_primary(regex_eval_df, config)})
 
     if ovr_config is not None:
         click.echo(
-            "Best OVR config: "
-            f"fields={','.join(ovr_config['fields'])}, threshold={ovr_config['threshold']:.3f}, "
-            f"ngram_max={ovr_config['ngram_max']}, top_k_fallback={ovr_config['top_k_fallback']}"
+            "Best OVR_LOGISTIC config: "
+            f"fields={','.join(ovr_config['fields'])}, model_family={ovr_config['model_family']}, "
+            f"threshold={ovr_config['threshold']:.3f}, "
+            f"ngram_max={ovr_config['ngram_max']}, char_ngram_max={ovr_config['char_ngram_max']}, "
+            f"model_c={float(ovr_config['model_c']):g}, "
+            f"class_weight_mode={ovr_config['class_weight_mode']}, "
+            f"top_k_fallback={ovr_config['top_k_fallback']}"
         )
         ovr_eval_df, _ = _build_ovr_artifacts(
             train_df=dev_df,
@@ -341,20 +386,62 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             config=ovr_config,
             n_jobs=n_jobs,
         )
-        summary_rows.append({"approach": "ovr", **_metrics_with_weighted_primary(ovr_eval_df, config)})
+        summary_rows.append({"approach": "ovr_logistic", **_metrics_with_weighted_primary(ovr_eval_df, config)})
 
-    if hybrid_config is not None:
+    if ovr_svc_config is not None:
         click.echo(
-            "Best Hybrid config: "
-            f"fields={','.join(hybrid_config['fields'])}, threshold={hybrid_config['threshold']:.3f}, "
-            f"ngram_max={hybrid_config['ngram_max']}, top_k_fallback={hybrid_config['top_k_fallback']}, "
-            f"hybrid_rule={hybrid_config['hybrid_rule']}, "
-            f"hybrid_conf={hybrid_config['hybrid_conf']}"
+            "Best OVR_SVC config: "
+            f"fields={','.join(ovr_svc_config['fields'])}, model_family={ovr_svc_config['model_family']}, "
+            f"threshold={ovr_svc_config['threshold']:.3f}, "
+            f"ngram_max={ovr_svc_config['ngram_max']}, char_ngram_max={ovr_svc_config['char_ngram_max']}, "
+            f"model_c={float(ovr_svc_config['model_c']):g}, "
+            f"class_weight_mode={ovr_svc_config['class_weight_mode']}, "
+            f"top_k_fallback={ovr_svc_config['top_k_fallback']}"
+        )
+        ovr_svc_eval_df, _ = _build_ovr_artifacts(
+            train_df=dev_df,
+            test_df=test_df,
+            config=ovr_svc_config,
+            n_jobs=n_jobs,
+        )
+        summary_rows.append({"approach": "ovr_svc", **_metrics_with_weighted_primary(ovr_svc_eval_df, config)})
+
+    if ovr_sgd_config is not None:
+        click.echo(
+            "Best OVR_SGD config: "
+            f"fields={','.join(ovr_sgd_config['fields'])}, model_family={ovr_sgd_config['model_family']}, "
+            f"threshold={ovr_sgd_config['threshold']:.3f}, "
+            f"ngram_max={ovr_sgd_config['ngram_max']}, char_ngram_max={ovr_sgd_config['char_ngram_max']}, "
+            f"sgd_loss={ovr_sgd_config['sgd_loss']}, "
+            f"sgd_alpha={float(ovr_sgd_config['sgd_alpha']):g}, "
+            f"class_weight_mode={ovr_sgd_config['class_weight_mode']}, "
+            f"top_k_fallback={ovr_sgd_config['top_k_fallback']}"
+        )
+        ovr_sgd_eval_df, _ = _build_ovr_artifacts(
+            train_df=dev_df,
+            test_df=test_df,
+            config=ovr_sgd_config,
+            n_jobs=n_jobs,
+        )
+        summary_rows.append({"approach": "ovr_sgd", **_metrics_with_weighted_primary(ovr_sgd_eval_df, config)})
+
+    if hybrid_logistic_config is not None:
+        click.echo(
+            "Best HYBRID_LOGISTIC config: "
+            f"fields={','.join(hybrid_logistic_config['fields'])}, model_family={hybrid_logistic_config['model_family']}, "
+            f"threshold={hybrid_logistic_config['threshold']:.3f}, "
+            f"ngram_max={hybrid_logistic_config['ngram_max']}, "
+            f"char_ngram_max={hybrid_logistic_config['char_ngram_max']}, "
+            f"model_c={float(hybrid_logistic_config['model_c']):g}, "
+            f"class_weight_mode={hybrid_logistic_config['class_weight_mode']}, "
+            f"top_k_fallback={hybrid_logistic_config['top_k_fallback']}, "
+            f"hybrid_rule={hybrid_logistic_config['hybrid_rule']}, "
+            f"hybrid_conf={hybrid_logistic_config['hybrid_conf']}"
         )
         hybrid_eval_ovr, hybrid_prob = _build_ovr_artifacts(
             train_df=dev_df,
             test_df=test_df,
-            config=hybrid_config,
+            config=hybrid_logistic_config,
             n_jobs=n_jobs,
         )
         # Hybrid is a decision layer over regex + OvR. 
@@ -367,10 +454,73 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             ovr_eval_df=hybrid_eval_ovr,
             regex_eval_df=regex_eval_df,
             ovr_probability_df=hybrid_prob,
-            rule=str(hybrid_config["hybrid_rule"]),
-            label_confidence_threshold=float(hybrid_config["hybrid_conf"]),
+            rule=str(hybrid_logistic_config["hybrid_rule"]),
+            label_confidence_threshold=float(hybrid_logistic_config["hybrid_conf"]),
         )
-        summary_rows.append({"approach": "hybrid", **_metrics_with_weighted_primary(hybrid_eval_df, config)})
+        summary_rows.append(
+            {"approach": "hybrid_logistic", **_metrics_with_weighted_primary(hybrid_eval_df, config)}
+        )
+
+    if hybrid_svc_config is not None:
+        click.echo(
+            "Best HYBRID_SVC config: "
+            f"fields={','.join(hybrid_svc_config['fields'])}, model_family={hybrid_svc_config['model_family']}, "
+            f"threshold={hybrid_svc_config['threshold']:.3f}, "
+            f"ngram_max={hybrid_svc_config['ngram_max']}, "
+            f"char_ngram_max={hybrid_svc_config['char_ngram_max']}, "
+            f"model_c={float(hybrid_svc_config['model_c']):g}, "
+            f"class_weight_mode={hybrid_svc_config['class_weight_mode']}, "
+            f"top_k_fallback={hybrid_svc_config['top_k_fallback']}, "
+            f"hybrid_rule={hybrid_svc_config['hybrid_rule']}, "
+            f"hybrid_conf={hybrid_svc_config['hybrid_conf']}"
+        )
+        hybrid_svc_eval_ovr, hybrid_svc_prob = _build_ovr_artifacts(
+            train_df=dev_df,
+            test_df=test_df,
+            config=hybrid_svc_config,
+            n_jobs=n_jobs,
+        )
+        hybrid_svc_eval_df = combine_hybrid_predictions(
+            ovr_eval_df=hybrid_svc_eval_ovr,
+            regex_eval_df=regex_eval_df,
+            ovr_probability_df=hybrid_svc_prob,
+            rule=str(hybrid_svc_config["hybrid_rule"]),
+            label_confidence_threshold=float(hybrid_svc_config["hybrid_conf"]),
+        )
+        summary_rows.append(
+            {"approach": "hybrid_svc", **_metrics_with_weighted_primary(hybrid_svc_eval_df, config)}
+        )
+
+    if hybrid_sgd_config is not None:
+        click.echo(
+            "Best HYBRID_SGD config: "
+            f"fields={','.join(hybrid_sgd_config['fields'])}, model_family={hybrid_sgd_config['model_family']}, "
+            f"threshold={hybrid_sgd_config['threshold']:.3f}, "
+            f"ngram_max={hybrid_sgd_config['ngram_max']}, "
+            f"char_ngram_max={hybrid_sgd_config['char_ngram_max']}, "
+            f"sgd_loss={hybrid_sgd_config['sgd_loss']}, "
+            f"sgd_alpha={float(hybrid_sgd_config['sgd_alpha']):g}, "
+            f"class_weight_mode={hybrid_sgd_config['class_weight_mode']}, "
+            f"top_k_fallback={hybrid_sgd_config['top_k_fallback']}, "
+            f"hybrid_rule={hybrid_sgd_config['hybrid_rule']}, "
+            f"hybrid_conf={hybrid_sgd_config['hybrid_conf']}"
+        )
+        hybrid_sgd_eval_ovr, hybrid_sgd_prob = _build_ovr_artifacts(
+            train_df=dev_df,
+            test_df=test_df,
+            config=hybrid_sgd_config,
+            n_jobs=n_jobs,
+        )
+        hybrid_sgd_eval_df = combine_hybrid_predictions(
+            ovr_eval_df=hybrid_sgd_eval_ovr,
+            regex_eval_df=regex_eval_df,
+            ovr_probability_df=hybrid_sgd_prob,
+            rule=str(hybrid_sgd_config["hybrid_rule"]),
+            label_confidence_threshold=float(hybrid_sgd_config["hybrid_conf"]),
+        )
+        summary_rows.append(
+            {"approach": "hybrid_sgd", **_metrics_with_weighted_primary(hybrid_sgd_eval_df, config)}
+        )
 
     summary_df = pd.DataFrame(summary_rows)
     _print_final_metrics(summary_df)
@@ -394,13 +544,13 @@ def evaluate_make_split(random_state: int, final_test_size: float) -> None:
     show_default=True,
 )
 @click.option("--random-state", default=None, type=int)
-@click.option("--quiet", is_flag=True, help="Suppress per-parameter progress lines during grid evaluation.")
+@click.option("--verbose", is_flag=True, help="Print each parameter combination during grid evaluation.")
 @click.option("--n-jobs", default=DEFAULT_N_JOBS, type=int, show_default=True)
 def evaluate_dev_grid(
     show_top: int,
     clean_text_mode: str,
     random_state: int | None,
-    quiet: bool,
+    verbose: bool,
     n_jobs: int,
 ) -> None:
     """Run the dev-only grid search on the fixed dev split."""
@@ -409,7 +559,7 @@ def evaluate_dev_grid(
         n_jobs=n_jobs,
         clean_mode=clean_text_mode,
         random_state=random_state,
-        quiet=quiet,
+        verbose=verbose,
     )
 
 
@@ -429,13 +579,13 @@ def evaluate_final_holdout(n_jobs: int) -> None:
     show_default=True,
 )
 @click.option("--random-state", default=None, type=int)
-@click.option("--quiet", is_flag=True, help="Suppress per-parameter progress lines during grid evaluation.")
+@click.option("--verbose", is_flag=True, help="Print each parameter combination during grid evaluation.")
 @click.option("--n-jobs", default=DEFAULT_N_JOBS, type=int, show_default=True)
 def evaluate_run_full_workflow(
     show_top: int,
     clean_text_mode: str,
     random_state: int | None,
-    quiet: bool,
+    verbose: bool,
     n_jobs: int,
 ) -> None:
     """Run dev-grid and then locked final-holdout using the saved best config."""
@@ -446,7 +596,7 @@ def evaluate_run_full_workflow(
         n_jobs=n_jobs,
         clean_mode=clean_text_mode,
         random_state=random_state,
-        quiet=quiet,
+        verbose=verbose,
     )
     click.echo("")
     _run_final_holdout(n_jobs=n_jobs)

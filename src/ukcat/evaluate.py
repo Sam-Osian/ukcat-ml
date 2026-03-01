@@ -24,7 +24,7 @@ from ukcat.ml_ukcat_hybrid import (
     DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLD,
     combine_hybrid_predictions,
 )
-from ukcat.ml_ukcat_ovr import _build_ukcat_ovr_pipeline, _predict_codes
+from ukcat.ml_ukcat_ovr import SGD_LOSS_CHOICES, _build_ukcat_ovr_pipeline, _predict_codes
 from ukcat.settings import (
     ML_DEFAULT_FIELDS,
     ML_RANDOM_STATE,
@@ -241,7 +241,13 @@ def _evaluate_ukcat_ovr_rows(
     top_k_fallback: int,
     n_jobs: int,
     ngram_max: int,
+    char_ngram_max: int,
     clean_text: bool,
+    model_family: str,
+    model_c: float,
+    class_weight_mode: str,
+    sgd_loss: str | None = None,
+    sgd_alpha: float | None = None,
 ) -> pd.DataFrame:
     eval_df, _ = _evaluate_ukcat_ovr_rows_with_scores(
         train_df=train_df,
@@ -251,7 +257,13 @@ def _evaluate_ukcat_ovr_rows(
         top_k_fallback=top_k_fallback,
         n_jobs=n_jobs,
         ngram_max=ngram_max,
+        char_ngram_max=char_ngram_max,
         clean_text=clean_text,
+        model_family=model_family,
+        model_c=model_c,
+        class_weight_mode=class_weight_mode,
+        sgd_loss=sgd_loss,
+        sgd_alpha=sgd_alpha,
     )
     return eval_df
 
@@ -264,7 +276,13 @@ def _evaluate_ukcat_ovr_rows_with_scores(
     top_k_fallback: int,
     n_jobs: int,
     ngram_max: int,
+    char_ngram_max: int,
     clean_text: bool,
+    model_family: str,
+    model_c: float,
+    class_weight_mode: str,
+    sgd_loss: str | None = None,
+    sgd_alpha: float | None = None,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     # Fit on the shared training split and score only the shared test split
     x_train = get_text_corpus(train_df, fields=list(fields), do_cleaning=clean_text)
@@ -275,7 +293,16 @@ def _evaluate_ukcat_ovr_rows_with_scores(
     mlb = MultiLabelBinarizer()
     y_train = mlb.fit_transform(y_train_codes)
 
-    model = _build_ukcat_ovr_pipeline(n_jobs=n_jobs, ngram_max=ngram_max)
+    model = _build_ukcat_ovr_pipeline(
+        n_jobs=n_jobs,
+        ngram_max=ngram_max,
+        char_ngram_max=char_ngram_max,
+        model_family=model_family,
+        model_c=model_c,
+        class_weight_mode=class_weight_mode,
+        sgd_loss=sgd_loss,
+        sgd_alpha=sgd_alpha,
+    )
     model.fit(x_train, y_train)
 
     pred_codes, prob_df = _predict_codes(
@@ -365,7 +392,10 @@ def _format_compare_metric(value: float, metric_name: str) -> str:
 @click.option(
     "--approach",
     "approaches",
-    type=click.Choice(["regex", "ovr", "hybrid"], case_sensitive=False),
+    type=click.Choice(
+        ["regex", "ovr_logistic", "hybrid_logistic", "hybrid_svc", "ovr_sgd", "hybrid_sgd"],
+        case_sensitive=False,
+    ),
     multiple=True,
     default=(),
     help="Approach(es) to run in compare mode (defaults to all registered approaches)",
@@ -413,6 +443,43 @@ def _format_compare_metric(value: float, metric_name: str) -> str:
     help="Maximum n-gram size for the OvR vectoriser in compare mode (uses 1..N)",
 )
 @click.option(
+    "--char-ngram-max",
+    default=0,
+    type=int,
+    show_default=True,
+    help="Maximum char_wb n-gram size for an optional character feature branch in compare mode (0 disables)",
+)
+@click.option(
+    "--model-family",
+    default=None,
+    type=click.Choice(["logistic", "linear_svc", "sgd"]),
+    help="Base estimator family used by the OvR approach in compare mode",
+)
+@click.option(
+    "--model-c",
+    default=None,
+    type=float,
+    help="Inverse regularisation strength used by the OvR approach in compare mode",
+)
+@click.option(
+    "--class-weight-mode",
+    default=None,
+    type=click.Choice(["none", "balanced"]),
+    help="Class weighting strategy used by the OvR approach in compare mode",
+)
+@click.option(
+    "--sgd-loss",
+    default=None,
+    type=click.Choice(SGD_LOSS_CHOICES),
+    help="Loss used by the OvR SGD approach in compare mode",
+)
+@click.option(
+    "--sgd-alpha",
+    default=None,
+    type=float,
+    help="Regularisation strength used by the OvR SGD approach in compare mode",
+)
+@click.option(
     "--fields",
     "-f",
     multiple=True,
@@ -430,14 +497,14 @@ def _format_compare_metric(value: float, metric_name: str) -> str:
     type=click.Choice(HYBRID_RULE_CHOICES, case_sensitive=False),
     default=HYBRID_RULE_OVR_REGEX_FALLBACK,
     show_default=True,
-    help="Decision rule used by the hybrid approach in compare mode",
+    help="Decision rule used by hybrid approaches in compare mode",
 )
 @click.option(
     "--hybrid-label-confidence-threshold",
     default=DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLD,
     type=float,
     show_default=True,
-    help="Label-level OvR probability gate used by label_conf_gated_regex in compare mode",
+    help="Label-level OvR score gate used by label_conf_gated_regex in compare mode",
 )
 @click.option(
     "--save-location",
@@ -462,6 +529,12 @@ def evaluate_ukcat(
     top_k_fallback: int,
     n_jobs: int,
     ngram_max: int,
+    char_ngram_max: int,
+    model_family: Optional[str],
+    model_c: Optional[float],
+    class_weight_mode: Optional[str],
+    sgd_loss: Optional[str],
+    sgd_alpha: Optional[float],
     fields: Sequence[str],
     clean_text: bool,
     hybrid_rule: str,
@@ -486,16 +559,47 @@ def evaluate_ukcat(
 
     if not 0 < test_size < 1:
         raise click.ClickException("--test-size must be between 0 and 1")
-    if not 0 <= threshold <= 1:
-        raise click.ClickException("--threshold must be between 0 and 1")
     if top_k_fallback < 0:
         raise click.ClickException("--top-k-fallback must be 0 or greater")
     if n_jobs < 1:
         raise click.ClickException("--n-jobs must be at least 1")
     if ngram_max < 1:
         raise click.ClickException("--ngram-max must be at least 1")
-    if not 0 <= hybrid_label_confidence_threshold <= 1:
-        raise click.ClickException("--hybrid-label-confidence-threshold must be between 0 and 1")
+    if char_ngram_max not in {0} and char_ngram_max < 3:
+        raise click.ClickException("--char-ngram-max must be 0 or at least 3")
+    if model_family is None:
+        raise click.ClickException("--model-family is required in compare mode")
+    if model_family == "logistic" and not 0 <= threshold <= 1:
+        raise click.ClickException("--threshold must be between 0 and 1 for logistic models")
+    if class_weight_mode is None:
+        raise click.ClickException("--class-weight-mode is required in compare mode")
+    approach_list = [a.lower() for a in approaches] if approaches else (
+        ["regex", "ovr_logistic", "hybrid_logistic"]
+        if model_family == "logistic"
+        else ["regex", "ovr_svc", "hybrid_svc"]
+        if model_family == "linear_svc"
+        else ["regex", "ovr_sgd", "hybrid_sgd"]
+    )
+    if "hybrid_logistic" in approach_list and model_family != "logistic":
+        raise click.ClickException("--model-family must be logistic when running hybrid_logistic in compare mode")
+    if "hybrid_svc" in approach_list and model_family != "linear_svc":
+        raise click.ClickException("--model-family must be linear_svc when running hybrid_svc in compare mode")
+    if "ovr_sgd" in approach_list and model_family != "sgd":
+        raise click.ClickException("--model-family must be sgd when running ovr_sgd in compare mode")
+    if "hybrid_sgd" in approach_list and model_family != "sgd":
+        raise click.ClickException("--model-family must be sgd when running hybrid_sgd in compare mode")
+    if model_family == "logistic" and not 0 <= hybrid_label_confidence_threshold <= 1:
+        raise click.ClickException(
+            "--hybrid-label-confidence-threshold must be between 0 and 1 for logistic-backed hybrid compare runs"
+        )
+    if model_family != "sgd":
+        if model_c is None or model_c <= 0:
+            raise click.ClickException("--model-c must be greater than 0 for logistic or linear_svc compare runs")
+    else:
+        if sgd_loss not in SGD_LOSS_CHOICES:
+            raise click.ClickException(f"--sgd-loss must be one of: {', '.join(SGD_LOSS_CHOICES)} for sgd compare runs")
+        if sgd_alpha is None or sgd_alpha <= 0:
+            raise click.ClickException("--sgd-alpha must be greater than 0 for sgd compare runs")
 
     labelled = _load_labelled_ukcat(sample_files)
     click.echo(f"Loaded labelled data [{len(labelled):,} rows]")
@@ -530,7 +634,13 @@ def evaluate_ukcat(
                 top_k_fallback=top_k_fallback,
                 n_jobs=n_jobs,
                 ngram_max=ngram_max,
+                char_ngram_max=char_ngram_max,
                 clean_text=clean_text,
+                model_family=model_family,
+                model_c=float(model_c) if model_c is not None else -1.0,
+                class_weight_mode=class_weight_mode,
+                sgd_loss=sgd_loss,
+                sgd_alpha=sgd_alpha,
             )
             cache["ovr_eval"] = eval_df
             cache["ovr_scores"] = prob_df
@@ -549,11 +659,14 @@ def evaluate_ukcat(
 
     evaluators = {
         "regex": _regex_eval,
-        "ovr": _ovr_eval,
-        "hybrid": _hybrid_eval,
+        "ovr_logistic": _ovr_eval,
+        "ovr_svc": _ovr_eval,
+        "ovr_sgd": _ovr_eval,
+        "hybrid_logistic": _hybrid_eval,
+        "hybrid_svc": _hybrid_eval,
+        "hybrid_sgd": _hybrid_eval,
     }
     # Default compare mode runs every registered approach so future models slot in cleanly..
-    approach_list = [a.lower() for a in approaches] if approaches else list(evaluators.keys())
     click.echo(f" - approaches: {', '.join(approach_list)}")
 
     metric_rows = []

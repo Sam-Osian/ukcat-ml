@@ -56,8 +56,8 @@ def create_ukcat_hybrid_model(
     save_location: str,
     n_jobs: int,
 ):
-    """Train the final selected hybrid UKCAT model on all labelled data."""
-    cfg = _get_selected_model_config(best_config, "hybrid")
+    """Train the final selected logistic hybrid UKCAT model on all labelled data."""
+    cfg = _get_selected_model_config(best_config, "hybrid_logistic")
     _train_ukcat_ovr_artifact(
         sample_files=sample_files,
         fields=tuple(cfg["fields"]),
@@ -65,6 +65,10 @@ def create_ukcat_hybrid_model(
         n_jobs=n_jobs,
         clean_text=bool(cfg["clean_text"]),
         ngram_max=int(cfg["ngram_max"]),
+        char_ngram_max=int(cfg.get("char_ngram_max", 0)),
+        model_family=str(cfg["model_family"]),
+        model_c=float(cfg["model_c"]),
+        class_weight_mode=str(cfg["class_weight_mode"]),
         threshold=float(cfg["threshold"]),
         top_k_fallback=int(cfg["top_k_fallback"]),
         model_type="ukcat_hybrid_ovr",
@@ -79,10 +83,14 @@ def create_ukcat_hybrid_model(
         "best_config_path": best_config,
         "ovr_model_path": ovr_save_location,
         "fields": list(cfg["fields"]),
+        "model_family": str(cfg["model_family"]),
         "threshold": float(cfg["threshold"]),
         "top_k_fallback": int(cfg["top_k_fallback"]),
         "clean_text": bool(cfg["clean_text"]),
         "ngram_max": int(cfg["ngram_max"]),
+        "char_ngram_max": int(cfg.get("char_ngram_max", 0)),
+        "model_c": float(cfg["model_c"]),
+        "class_weight_mode": str(cfg["class_weight_mode"]),
         "include_groups": bool(cfg["include_groups"]),
         "hybrid_rule": cfg["hybrid_rule"],
         "hybrid_conf": float(cfg["hybrid_conf"]),
