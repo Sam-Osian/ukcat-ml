@@ -135,6 +135,8 @@ def _row_to_config(row: pd.Series, approach: str, args, sort_by: str) -> dict[st
         "ngram_max": int(row["ngram_max"]),
         "char_ngram_max": int(row["char_ngram_max"]),
         "model_c": float(row["model_c"]),
+        "fallback_mode": str(row["fallback_mode"]),
+        "fallback_min_score": float(row["fallback_min_score"]),
         "class_weight_mode": str(row["class_weight_mode"]),
         "sgd_loss": None if pd.isna(row["sgd_loss"]) or str(row["sgd_loss"]) == "" else str(row["sgd_loss"]),
         "sgd_alpha": (
@@ -296,6 +298,8 @@ def _build_ovr_artifacts(
         fields=tuple(config["fields"]),
         threshold=float(config["threshold"]),
         top_k_fallback=int(config["top_k_fallback"]),
+        fallback_mode=str(config.get("fallback_mode", "top_k")),
+        fallback_min_score=float(config.get("fallback_min_score", 0.0)),
         n_jobs=n_jobs,
         ngram_max=int(config["ngram_max"]),
         char_ngram_max=int(config.get("char_ngram_max", 0)),
@@ -378,7 +382,9 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             f"ngram_max={ovr_config['ngram_max']}, char_ngram_max={ovr_config['char_ngram_max']}, "
             f"model_c={float(ovr_config['model_c']):g}, "
             f"class_weight_mode={ovr_config['class_weight_mode']}, "
-            f"top_k_fallback={ovr_config['top_k_fallback']}"
+            f"top_k_fallback={ovr_config['top_k_fallback']}, "
+            f"fallback_mode={ovr_config['fallback_mode']}, "
+            f"fallback_min_score={ovr_config['fallback_min_score']}"
         )
         ovr_eval_df, _ = _build_ovr_artifacts(
             train_df=dev_df,
@@ -396,7 +402,9 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             f"ngram_max={ovr_svc_config['ngram_max']}, char_ngram_max={ovr_svc_config['char_ngram_max']}, "
             f"model_c={float(ovr_svc_config['model_c']):g}, "
             f"class_weight_mode={ovr_svc_config['class_weight_mode']}, "
-            f"top_k_fallback={ovr_svc_config['top_k_fallback']}"
+            f"top_k_fallback={ovr_svc_config['top_k_fallback']}, "
+            f"fallback_mode={ovr_svc_config['fallback_mode']}, "
+            f"fallback_min_score={ovr_svc_config['fallback_min_score']}"
         )
         ovr_svc_eval_df, _ = _build_ovr_artifacts(
             train_df=dev_df,
@@ -415,7 +423,9 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             f"sgd_loss={ovr_sgd_config['sgd_loss']}, "
             f"sgd_alpha={float(ovr_sgd_config['sgd_alpha']):g}, "
             f"class_weight_mode={ovr_sgd_config['class_weight_mode']}, "
-            f"top_k_fallback={ovr_sgd_config['top_k_fallback']}"
+            f"top_k_fallback={ovr_sgd_config['top_k_fallback']}, "
+            f"fallback_mode={ovr_sgd_config['fallback_mode']}, "
+            f"fallback_min_score={ovr_sgd_config['fallback_min_score']}"
         )
         ovr_sgd_eval_df, _ = _build_ovr_artifacts(
             train_df=dev_df,
@@ -435,6 +445,8 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             f"model_c={float(hybrid_logistic_config['model_c']):g}, "
             f"class_weight_mode={hybrid_logistic_config['class_weight_mode']}, "
             f"top_k_fallback={hybrid_logistic_config['top_k_fallback']}, "
+            f"fallback_mode={hybrid_logistic_config['fallback_mode']}, "
+            f"fallback_min_score={hybrid_logistic_config['fallback_min_score']}, "
             f"hybrid_rule={hybrid_logistic_config['hybrid_rule']}, "
             f"hybrid_conf={hybrid_logistic_config['hybrid_conf']}"
         )
@@ -471,6 +483,8 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             f"model_c={float(hybrid_svc_config['model_c']):g}, "
             f"class_weight_mode={hybrid_svc_config['class_weight_mode']}, "
             f"top_k_fallback={hybrid_svc_config['top_k_fallback']}, "
+            f"fallback_mode={hybrid_svc_config['fallback_mode']}, "
+            f"fallback_min_score={hybrid_svc_config['fallback_min_score']}, "
             f"hybrid_rule={hybrid_svc_config['hybrid_rule']}, "
             f"hybrid_conf={hybrid_svc_config['hybrid_conf']}"
         )
@@ -502,6 +516,8 @@ def _run_final_holdout(n_jobs: int) -> pd.DataFrame:
             f"sgd_alpha={float(hybrid_sgd_config['sgd_alpha']):g}, "
             f"class_weight_mode={hybrid_sgd_config['class_weight_mode']}, "
             f"top_k_fallback={hybrid_sgd_config['top_k_fallback']}, "
+            f"fallback_mode={hybrid_sgd_config['fallback_mode']}, "
+            f"fallback_min_score={hybrid_sgd_config['fallback_min_score']}, "
             f"hybrid_rule={hybrid_sgd_config['hybrid_rule']}, "
             f"hybrid_conf={hybrid_sgd_config['hybrid_conf']}"
         )

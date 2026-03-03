@@ -24,7 +24,14 @@ from ukcat.ml_ukcat_hybrid import (
     DEFAULT_HYBRID_LABEL_CONFIDENCE_THRESHOLD,
     combine_hybrid_predictions,
 )
-from ukcat.ml_ukcat_ovr import SGD_LOSS_CHOICES, _build_ukcat_ovr_pipeline, _predict_codes
+from ukcat.ml_ukcat_ovr import (
+    FALLBACK_MODE_CHOICES,
+    FALLBACK_MODE_MAX_SCORE_TOP_1,
+    FALLBACK_MODE_TOP_K,
+    SGD_LOSS_CHOICES,
+    _build_ukcat_ovr_pipeline,
+    _predict_codes,
+)
 from ukcat.settings import (
     ML_DEFAULT_FIELDS,
     ML_RANDOM_STATE,
@@ -239,6 +246,8 @@ def _evaluate_ukcat_ovr_rows(
     fields: Sequence[str],
     threshold: float,
     top_k_fallback: int,
+    fallback_mode: str,
+    fallback_min_score: float,
     n_jobs: int,
     ngram_max: int,
     char_ngram_max: int,
@@ -255,6 +264,8 @@ def _evaluate_ukcat_ovr_rows(
         fields=fields,
         threshold=threshold,
         top_k_fallback=top_k_fallback,
+        fallback_mode=fallback_mode,
+        fallback_min_score=fallback_min_score,
         n_jobs=n_jobs,
         ngram_max=ngram_max,
         char_ngram_max=char_ngram_max,
@@ -274,6 +285,8 @@ def _evaluate_ukcat_ovr_rows_with_scores(
     fields: Sequence[str],
     threshold: float,
     top_k_fallback: int,
+    fallback_mode: str,
+    fallback_min_score: float,
     n_jobs: int,
     ngram_max: int,
     char_ngram_max: int,
@@ -310,7 +323,9 @@ def _evaluate_ukcat_ovr_rows_with_scores(
         mlb,
         x_test,
         threshold=threshold,
+        fallback_mode=fallback_mode,
         top_k_fallback=top_k_fallback,
+        fallback_min_score=fallback_min_score,
     )
     eval_df = pd.DataFrame(
         {
@@ -429,6 +444,20 @@ def _format_compare_metric(value: float, metric_name: str) -> str:
     help="If no labels pass threshold, assign the top-k labels in compare-mode OvR",
 )
 @click.option(
+    "--fallback-mode",
+    default=FALLBACK_MODE_TOP_K,
+    type=click.Choice(FALLBACK_MODE_CHOICES),
+    show_default=True,
+    help="Fallback strategy used when no labels pass threshold in compare mode",
+)
+@click.option(
+    "--fallback-min-score",
+    default=0.0,
+    type=float,
+    show_default=True,
+    help="Minimum top score required by max_score_top_1 fallback in compare mode",
+)
+@click.option(
     "--n-jobs",
     default=1,
     type=int,
@@ -527,6 +556,8 @@ def evaluate_ukcat(
     test_size: float,
     threshold: float,
     top_k_fallback: int,
+    fallback_mode: str,
+    fallback_min_score: float,
     n_jobs: int,
     ngram_max: int,
     char_ngram_max: int,
@@ -561,6 +592,8 @@ def evaluate_ukcat(
         raise click.ClickException("--test-size must be between 0 and 1")
     if top_k_fallback < 0:
         raise click.ClickException("--top-k-fallback must be 0 or greater")
+    if fallback_mode not in FALLBACK_MODE_CHOICES:
+        raise click.ClickException(f"--fallback-mode must be one of: {', '.join(FALLBACK_MODE_CHOICES)}")
     if n_jobs < 1:
         raise click.ClickException("--n-jobs must be at least 1")
     if ngram_max < 1:
@@ -632,6 +665,8 @@ def evaluate_ukcat(
                 fields=fields,
                 threshold=threshold,
                 top_k_fallback=top_k_fallback,
+                fallback_mode=fallback_mode,
+                fallback_min_score=fallback_min_score,
                 n_jobs=n_jobs,
                 ngram_max=ngram_max,
                 char_ngram_max=char_ngram_max,

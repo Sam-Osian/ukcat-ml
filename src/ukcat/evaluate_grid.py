@@ -22,6 +22,7 @@ from ukcat.ml_ukcat_hybrid import (
     combine_hybrid_predictions,
 )
 from ukcat.ml_ukcat_ovr import SGD_LOSS_CHOICES
+from ukcat.ml_ukcat_ovr import FALLBACK_MODE_CHOICES, FALLBACK_MODE_MAX_SCORE_TOP_1, FALLBACK_MODE_TOP_K
 
 # Evaluation model notes:
 # - Regex is the hand-written baseline and emits UK-CAT codes directly from text rules.
@@ -44,6 +45,8 @@ OVR_LOGISTIC_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
 OVR_LOGISTIC_DEFAULT_C_VALUES = (10.0, 20.0, 30.0)
 OVR_LOGISTIC_DEFAULT_CLASS_WEIGHT_MODES = ("balanced",) # balanced and/or none
 OVR_LOGISTIC_DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+OVR_LOGISTIC_DEFAULT_FALLBACK_MODES = ("top_k", "max_score_top_1")
+OVR_LOGISTIC_DEFAULT_FALLBACK_MIN_SCORE_VALUES = (0.05, 0.10, 0.15, 0.20)
 
 OVR_SVC_DEFAULT_THRESHOLDS = (-0.75, -0.50, -0.25)
 OVR_SVC_DEFAULT_NGRAM_MAX_VALUES = (1, 2)
@@ -51,6 +54,8 @@ OVR_SVC_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
 OVR_SVC_DEFAULT_C_VALUES = (0.3, 1.0, 2.0, 3.0)
 OVR_SVC_DEFAULT_CLASS_WEIGHT_MODES = ("balanced", "none")
 OVR_SVC_DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+OVR_SVC_DEFAULT_FALLBACK_MODES = ("top_k", "max_score_top_1")
+OVR_SVC_DEFAULT_FALLBACK_MIN_SCORE_VALUES = (-0.25, -0.10, 0.0)
 
 OVR_SGD_DEFAULT_THRESHOLDS = (0.22, 0.25, 0.275, 0.30, 0.325)
 OVR_SGD_DEFAULT_NGRAM_MAX_VALUES = (2,)
@@ -59,6 +64,8 @@ OVR_SGD_DEFAULT_LOSSES = ("modified_huber",)
 OVR_SGD_DEFAULT_ALPHA_VALUES = (0.0002, 0.0003, 0.0004, 0.0005, 0.00075)
 OVR_SGD_DEFAULT_CLASS_WEIGHT_MODES = ("none",)
 OVR_SGD_DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+OVR_SGD_DEFAULT_FALLBACK_MODES = ("top_k", "max_score_top_1")
+OVR_SGD_DEFAULT_FALLBACK_MIN_SCORE_VALUES = (0.05, 0.10, 0.15, 0.20)
 
 HYBRID_LOGISTIC_DEFAULT_THRESHOLDS = (0.125, 0.15, 0.20, 0.25)
 HYBRID_LOGISTIC_DEFAULT_NGRAM_MAX_VALUES = (1, 2)
@@ -66,6 +73,8 @@ HYBRID_LOGISTIC_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
 HYBRID_LOGISTIC_DEFAULT_C_VALUES = (2500, 3000, 3500, 4000)
 HYBRID_LOGISTIC_DEFAULT_CLASS_WEIGHT_MODES = ("none",) # balanced and/or none
 HYBRID_LOGISTIC_DEFAULT_TOP_K_FALLBACK_VALUES = (0, 1)
+HYBRID_LOGISTIC_DEFAULT_FALLBACK_MODES = ("top_k", "max_score_top_1")
+HYBRID_LOGISTIC_DEFAULT_FALLBACK_MIN_SCORE_VALUES = (0.05, 0.10, 0.15, 0.20)
 HYBRID_LOGISTIC_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS = (0.00002, 0.00003, 0.00004, 0.00005, 0.000075)
 
 HYBRID_SVC_DEFAULT_THRESHOLDS = (-0.4, -0.3, -0.2, -0.1, 0.0)
@@ -74,16 +83,20 @@ HYBRID_SVC_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 5)
 HYBRID_SVC_DEFAULT_C_VALUES = (0.3, 0.5, 1.0)
 HYBRID_SVC_DEFAULT_CLASS_WEIGHT_MODES = ("balanced", )
 HYBRID_SVC_DEFAULT_TOP_K_FALLBACK_VALUES = (1, )
+HYBRID_SVC_DEFAULT_FALLBACK_MODES = ("top_k", "max_score_top_1")
+HYBRID_SVC_DEFAULT_FALLBACK_MIN_SCORE_VALUES = (-0.25, -0.10, 0.0)
 HYBRID_SVC_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS = (0.125, 0.25, 0.35)
 
-HYBRID_SGD_DEFAULT_THRESHOLDS = (0.24, 0.25, 0.26, 0.275, 0.29, 0.30, 0.325)
+HYBRID_SGD_DEFAULT_THRESHOLDS = (0.25, 0.275, 0.30, 0.325)
 HYBRID_SGD_DEFAULT_NGRAM_MAX_VALUES = (2,)
-HYBRID_SGD_DEFAULT_CHAR_NGRAM_MAX_VALUES = (0, 4, 5, 6, 7)
+HYBRID_SGD_DEFAULT_CHAR_NGRAM_MAX_VALUES = (5, 6, 7)
 HYBRID_SGD_DEFAULT_LOSSES = ("log_loss",)
 HYBRID_SGD_DEFAULT_ALPHA_VALUES = (0.000003, 0.000005, 0.0000075, 0.00001, 0.000015, 0.00002)
 HYBRID_SGD_DEFAULT_CLASS_WEIGHT_MODES = ("none",)
 HYBRID_SGD_DEFAULT_TOP_K_FALLBACK_VALUES = (0,)
-HYBRID_SGD_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS = (0.005, 0.0075, 0.01, 0.0125, 0.015, 0.02)
+HYBRID_SGD_DEFAULT_FALLBACK_MODES = ("top_k", "max_score_top_1")
+HYBRID_SGD_DEFAULT_FALLBACK_MIN_SCORE_VALUES = (0.005, 0.01, 0.015, 0.02)
+HYBRID_SGD_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS = (0.005, 0.0075, 0.01, 0.015)
 DEFAULT_CLEAN_TEXT_MODE = "on" # can be set to 'on', 'off' or 'compare'
 DEFAULT_FIELD_SETS = (
     ("name", "activities"),
@@ -124,8 +137,8 @@ OPTIMISATION_METRICS = tuple(metric for metric, _, _ in OPTIMISATION_METRIC_SPEC
 # Keep these non-negative and summing to 1.0.
 WEIGHTED_PRIMARY_F1_MICRO = 0.35
 WEIGHTED_PRIMARY_F1_MACRO = 0.40
-WEIGHTED_PRIMARY_RECALL_MICRO = 0.15
-WEIGHTED_PRIMARY_PRECISION_MICRO = 0.10
+WEIGHTED_PRIMARY_RECALL_MICRO = 0.25
+WEIGHTED_PRIMARY_PRECISION_MICRO = 0.0
 
 # Optional uardrails (applied to the candidate approach being ranked: OVR and/or Hybrid)
 # Setting to 0 essentially turns that guardrail 'off'
@@ -163,6 +176,8 @@ GRID_GROUP_COLUMNS = (
     "sgd_loss",
     "sgd_alpha",
     "class_weight_mode",
+    "fallback_mode",
+    "fallback_min_score",
     "top_k_fallback",
     "hybrid_label_confidence_threshold",
 )
@@ -196,6 +211,8 @@ class GridParams:
     sgd_loss: str
     sgd_alpha: float
     class_weight_mode: str
+    fallback_mode: str
+    fallback_min_score: float
     top_k_fallback: int
     hybrid_label_confidence_threshold: float
 
@@ -309,6 +326,28 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Single OVR logistic top-k fallback override.",
     )
     parser.add_argument(
+        "--ovr-fallback-modes",
+        default=",".join(_parse_csv_list(OVR_LOGISTIC_DEFAULT_FALLBACK_MODES)),
+        help="Comma-separated OVR logistic fallback modes to test.",
+    )
+    parser.add_argument(
+        "--ovr-fallback-mode",
+        choices=FALLBACK_MODE_CHOICES,
+        default=None,
+        help="Single OVR logistic fallback mode override.",
+    )
+    parser.add_argument(
+        "--ovr-fallback-min-score-values",
+        default=",".join(_parse_csv_list(OVR_LOGISTIC_DEFAULT_FALLBACK_MIN_SCORE_VALUES)),
+        help="Comma-separated OVR logistic gated-fallback minimum scores to test.",
+    )
+    parser.add_argument(
+        "--ovr-fallback-min-score",
+        type=float,
+        default=None,
+        help="Single OVR logistic gated-fallback minimum score override.",
+    )
+    parser.add_argument(
         "--ovr-svc-thresholds",
         default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_THRESHOLDS)),
         help="Comma-separated OVR LinearSVC decision thresholds to test.",
@@ -349,6 +388,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated OVR SVC fallback values (0 disables fallback).",
     )
     parser.add_argument("--ovr-svc-top-k-fallback", type=int, default=None, help="Single OVR SVC top-k fallback override.")
+    parser.add_argument(
+        "--ovr-svc-fallback-modes",
+        default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_FALLBACK_MODES)),
+        help="Comma-separated OVR SVC fallback modes to test.",
+    )
+    parser.add_argument("--ovr-svc-fallback-mode", choices=FALLBACK_MODE_CHOICES, default=None, help="Single OVR SVC fallback mode override.")
+    parser.add_argument(
+        "--ovr-svc-fallback-min-score-values",
+        default=",".join(_parse_csv_list(OVR_SVC_DEFAULT_FALLBACK_MIN_SCORE_VALUES)),
+        help="Comma-separated OVR SVC gated-fallback minimum scores to test.",
+    )
+    parser.add_argument("--ovr-svc-fallback-min-score", type=float, default=None, help="Single OVR SVC gated-fallback minimum score override.")
     parser.add_argument(
         "--ovr-sgd-thresholds",
         default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_THRESHOLDS)),
@@ -402,6 +453,18 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--ovr-sgd-top-k-fallback", type=int, default=None, help="Single OVR SGD top-k fallback override.")
     parser.add_argument(
+        "--ovr-sgd-fallback-modes",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_FALLBACK_MODES)),
+        help="Comma-separated OVR SGD fallback modes to test.",
+    )
+    parser.add_argument("--ovr-sgd-fallback-mode", choices=FALLBACK_MODE_CHOICES, default=None, help="Single OVR SGD fallback mode override.")
+    parser.add_argument(
+        "--ovr-sgd-fallback-min-score-values",
+        default=",".join(_parse_csv_list(OVR_SGD_DEFAULT_FALLBACK_MIN_SCORE_VALUES)),
+        help="Comma-separated OVR SGD gated-fallback minimum scores to test.",
+    )
+    parser.add_argument("--ovr-sgd-fallback-min-score", type=float, default=None, help="Single OVR SGD gated-fallback minimum score override.")
+    parser.add_argument(
         "--hybrid-logistic-thresholds",
         default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_THRESHOLDS)),
         help="Comma-separated hybrid logistic thresholds to test.",
@@ -447,6 +510,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Single hybrid logistic top-k fallback override.",
     )
+    parser.add_argument(
+        "--hybrid-logistic-fallback-modes",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_FALLBACK_MODES)),
+        help="Comma-separated hybrid logistic fallback modes to test.",
+    )
+    parser.add_argument("--hybrid-logistic-fallback-mode", choices=FALLBACK_MODE_CHOICES, default=None, help="Single hybrid logistic fallback mode override.")
+    parser.add_argument(
+        "--hybrid-logistic-fallback-min-score-values",
+        default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_FALLBACK_MIN_SCORE_VALUES)),
+        help="Comma-separated hybrid logistic gated-fallback minimum scores to test.",
+    )
+    parser.add_argument("--hybrid-logistic-fallback-min-score", type=float, default=None, help="Single hybrid logistic gated-fallback minimum score override.")
     parser.add_argument(
         "--hybrid-logistic-label-confidence-threshold-values",
         default=",".join(_parse_csv_list(HYBRID_LOGISTIC_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS)),
@@ -504,6 +579,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Single hybrid SVC top-k fallback override.",
     )
+    parser.add_argument(
+        "--hybrid-svc-fallback-modes",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_FALLBACK_MODES)),
+        help="Comma-separated hybrid SVC fallback modes to test.",
+    )
+    parser.add_argument("--hybrid-svc-fallback-mode", choices=FALLBACK_MODE_CHOICES, default=None, help="Single hybrid SVC fallback mode override.")
+    parser.add_argument(
+        "--hybrid-svc-fallback-min-score-values",
+        default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_FALLBACK_MIN_SCORE_VALUES)),
+        help="Comma-separated hybrid SVC gated-fallback minimum scores to test.",
+    )
+    parser.add_argument("--hybrid-svc-fallback-min-score", type=float, default=None, help="Single hybrid SVC gated-fallback minimum score override.")
     parser.add_argument(
         "--hybrid-svc-label-confidence-threshold-values",
         default=",".join(_parse_csv_list(HYBRID_SVC_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS)),
@@ -572,6 +659,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Single hybrid SGD top-k fallback override.",
     )
+    parser.add_argument(
+        "--hybrid-sgd-fallback-modes",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_FALLBACK_MODES)),
+        help="Comma-separated hybrid SGD fallback modes to test.",
+    )
+    parser.add_argument("--hybrid-sgd-fallback-mode", choices=FALLBACK_MODE_CHOICES, default=None, help="Single hybrid SGD fallback mode override.")
+    parser.add_argument(
+        "--hybrid-sgd-fallback-min-score-values",
+        default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_FALLBACK_MIN_SCORE_VALUES)),
+        help="Comma-separated hybrid SGD gated-fallback minimum scores to test.",
+    )
+    parser.add_argument("--hybrid-sgd-fallback-min-score", type=float, default=None, help="Single hybrid SGD gated-fallback minimum score override.")
     parser.add_argument(
         "--hybrid-sgd-label-confidence-threshold-values",
         default=",".join(_parse_csv_list(HYBRID_SGD_DEFAULT_LABEL_CONFIDENCE_THRESHOLDS)),
@@ -763,19 +862,33 @@ def _validate_weighted_primary_weights() -> None:
 def _predict_codes(
     prob_df: pd.DataFrame,
     threshold: float,
+    fallback_mode: str,
     top_k_fallback: int,
+    fallback_min_score: float,
 ) -> list[list[str]]:
     # OvR produces one probability per label. The multilabel prediction is then
     # reconstructed by thresholding each label independently, with an optional
     # fallback that forces the top-k labels on rows where nothing clears the cut
     pred_binary = (prob_df.values >= threshold).astype(int)
-    if top_k_fallback > 0 and pred_binary.shape[1] > 0:
-        k = min(top_k_fallback, pred_binary.shape[1])
-        for i in range(pred_binary.shape[0]):
-            if pred_binary[i].sum() > 0:
-                continue
-            top_idx = prob_df.iloc[i].to_numpy().argsort()[-k:]
-            pred_binary[i, top_idx] = 1
+    if pred_binary.shape[1] > 0:
+        if fallback_mode == FALLBACK_MODE_TOP_K:
+            if top_k_fallback > 0:
+                k = min(top_k_fallback, pred_binary.shape[1])
+                for i in range(pred_binary.shape[0]):
+                    if pred_binary[i].sum() > 0:
+                        continue
+                    top_idx = prob_df.iloc[i].to_numpy().argsort()[-k:]
+                    pred_binary[i, top_idx] = 1
+        elif fallback_mode == FALLBACK_MODE_MAX_SCORE_TOP_1:
+            for i in range(pred_binary.shape[0]):
+                if pred_binary[i].sum() > 0:
+                    continue
+                row_scores = prob_df.iloc[i].to_numpy()
+                best_idx = int(row_scores.argmax())
+                if float(row_scores[best_idx]) >= fallback_min_score:
+                    pred_binary[i, best_idx] = 1
+        elif fallback_mode != "none":
+            raise SystemExit(f"Unsupported fallback mode: {fallback_mode}")
 
     labels = list(map(str, prob_df.columns))
     predicted_codes: list[list[str]] = []
@@ -789,7 +902,9 @@ def _build_eval(
     prob_df: pd.DataFrame,
     true_codes_by_org: pd.Series,
     threshold: float,
+    fallback_mode: str,
     top_k_fallback: int,
+    fallback_min_score: float,
 ) -> pd.DataFrame:
     # At this point the OvR model has already produced a probability table with:
     # - one row per charity
@@ -799,7 +914,9 @@ def _build_eval(
     predicted_codes = _predict_codes(
         prob_df=prob_df,
         threshold=threshold,
+        fallback_mode=fallback_mode,
         top_k_fallback=top_k_fallback,
+        fallback_min_score=fallback_min_score,
     )
     org_ids = prob_df.index.astype(str)
     aligned_true_codes = true_codes_by_org.reindex(org_ids).tolist()
@@ -831,7 +948,9 @@ def _score_pair(
         prob_df=ovr_probability_df,
         true_codes_by_org=true_codes_by_org,
         threshold=params.threshold,
+        fallback_mode=params.fallback_mode,
         top_k_fallback=params.top_k_fallback,
+        fallback_min_score=params.fallback_min_score,
     )
     # Hybrid is a second decision layer, not a separate fit. It takes:
     # - regex labels, which encode strong hand-written rules
@@ -877,6 +996,8 @@ def _score_pair(
         "sgd_loss": params.sgd_loss,
         "sgd_alpha": params.sgd_alpha,
         "class_weight_mode": params.class_weight_mode,
+        "fallback_mode": params.fallback_mode,
+        "fallback_min_score": params.fallback_min_score,
         "top_k_fallback": params.top_k_fallback,
         "hybrid_label_confidence_threshold": params.hybrid_label_confidence_threshold,
     }
@@ -974,39 +1095,52 @@ def _build_grid(
     sgd_loss_values: Sequence[str],
     sgd_alpha_values: Sequence[float],
     class_weight_modes: Sequence[str],
+    fallback_modes: Sequence[str],
+    fallback_min_score_values: Sequence[float],
     top_k_values: Sequence[int],
     hybrid_label_conf_values: Sequence[float],
 ) -> list[GridParams]:
-    return [
-        GridParams(
-            grid_approach=approach,
-            fields=field_set,
-            clean_text=clean_text,
-            model_family=model_family,
-            threshold=t,
-            ngram_max=n,
-            char_ngram_max=char_n,
-            model_c=c,
-            sgd_loss=sgd_loss,
-            sgd_alpha=sgd_alpha,
-            class_weight_mode=class_weight_mode,
-            top_k_fallback=k,
-            hybrid_label_confidence_threshold=h,
-        )
-        for field_set, clean_text, t, n, char_n, c, sgd_loss, sgd_alpha, class_weight_mode, k, h in product(
-            field_sets,
-            clean_values,
-            thresholds,
-            ngram_max_values,
-            char_ngram_max_values,
-            model_c_values,
-            sgd_loss_values,
-            sgd_alpha_values,
-            class_weight_modes,
-            top_k_values,
-            hybrid_label_conf_values,
-        )
-    ]
+    grid: list[GridParams] = []
+    for field_set, clean_text, t, n, char_n, c, sgd_loss, sgd_alpha, class_weight_mode, fallback_mode, h in product(
+        field_sets,
+        clean_values,
+        thresholds,
+        ngram_max_values,
+        char_ngram_max_values,
+        model_c_values,
+        sgd_loss_values,
+        sgd_alpha_values,
+        class_weight_modes,
+        fallback_modes,
+        hybrid_label_conf_values,
+    ):
+        if fallback_mode == FALLBACK_MODE_TOP_K:
+            fallback_pairs = [(0.0, k) for k in top_k_values]
+        elif fallback_mode == FALLBACK_MODE_MAX_SCORE_TOP_1:
+            fallback_pairs = [(min_score, 0) for min_score in fallback_min_score_values]
+        else:
+            fallback_pairs = [(0.0, 0)]
+        for fallback_min_score, k in fallback_pairs:
+            grid.append(
+                GridParams(
+                    grid_approach=approach,
+                    fields=field_set,
+                    clean_text=clean_text,
+                    model_family=model_family,
+                    threshold=t,
+                    ngram_max=n,
+                    char_ngram_max=char_n,
+                    model_c=c,
+                    sgd_loss=sgd_loss,
+                    sgd_alpha=sgd_alpha,
+                    class_weight_mode=class_weight_mode,
+                    fallback_mode=fallback_mode,
+                    fallback_min_score=fallback_min_score,
+                    top_k_fallback=k,
+                    hybrid_label_confidence_threshold=h,
+                )
+            )
+    return grid
 
 
 def _grid(
@@ -1040,6 +1174,12 @@ def _grid(
                 class_weight_modes=[params.ovr_class_weight_mode]
                 if params.ovr_class_weight_mode is not None
                 else _parse_csv_list(params.ovr_class_weight_modes),
+                fallback_modes=[params.ovr_fallback_mode]
+                if params.ovr_fallback_mode is not None
+                else _parse_csv_list(params.ovr_fallback_modes),
+                fallback_min_score_values=[params.ovr_fallback_min_score]
+                if params.ovr_fallback_min_score is not None
+                else _parse_float_csv(params.ovr_fallback_min_score_values),
                 top_k_values=[params.ovr_top_k_fallback]
                 if params.ovr_top_k_fallback is not None
                 else _parse_int_csv(params.ovr_top_k_fallback_values),
@@ -1070,6 +1210,12 @@ def _grid(
                 class_weight_modes=[params.ovr_svc_class_weight_mode]
                 if params.ovr_svc_class_weight_mode is not None
                 else _parse_csv_list(params.ovr_svc_class_weight_modes),
+                fallback_modes=[params.ovr_svc_fallback_mode]
+                if params.ovr_svc_fallback_mode is not None
+                else _parse_csv_list(params.ovr_svc_fallback_modes),
+                fallback_min_score_values=[params.ovr_svc_fallback_min_score]
+                if params.ovr_svc_fallback_min_score is not None
+                else _parse_float_csv(params.ovr_svc_fallback_min_score_values),
                 top_k_values=[params.ovr_svc_top_k_fallback]
                 if params.ovr_svc_top_k_fallback is not None
                 else _parse_int_csv(params.ovr_svc_top_k_fallback_values),
@@ -1102,6 +1248,12 @@ def _grid(
                 class_weight_modes=[params.ovr_sgd_class_weight_mode]
                 if params.ovr_sgd_class_weight_mode is not None
                 else _parse_csv_list(params.ovr_sgd_class_weight_modes),
+                fallback_modes=[params.ovr_sgd_fallback_mode]
+                if params.ovr_sgd_fallback_mode is not None
+                else _parse_csv_list(params.ovr_sgd_fallback_modes),
+                fallback_min_score_values=[params.ovr_sgd_fallback_min_score]
+                if params.ovr_sgd_fallback_min_score is not None
+                else _parse_float_csv(params.ovr_sgd_fallback_min_score_values),
                 top_k_values=[params.ovr_sgd_top_k_fallback]
                 if params.ovr_sgd_top_k_fallback is not None
                 else _parse_int_csv(params.ovr_sgd_top_k_fallback_values),
@@ -1132,6 +1284,12 @@ def _grid(
                 class_weight_modes=[params.hybrid_logistic_class_weight_mode]
                 if params.hybrid_logistic_class_weight_mode is not None
                 else _parse_csv_list(params.hybrid_logistic_class_weight_modes),
+                fallback_modes=[params.hybrid_logistic_fallback_mode]
+                if params.hybrid_logistic_fallback_mode is not None
+                else _parse_csv_list(params.hybrid_logistic_fallback_modes),
+                fallback_min_score_values=[params.hybrid_logistic_fallback_min_score]
+                if params.hybrid_logistic_fallback_min_score is not None
+                else _parse_float_csv(params.hybrid_logistic_fallback_min_score_values),
                 top_k_values=[params.hybrid_logistic_top_k_fallback]
                 if params.hybrid_logistic_top_k_fallback is not None
                 else _parse_int_csv(params.hybrid_logistic_top_k_fallback_values),
@@ -1164,6 +1322,12 @@ def _grid(
                 class_weight_modes=[params.hybrid_svc_class_weight_mode]
                 if params.hybrid_svc_class_weight_mode is not None
                 else _parse_csv_list(params.hybrid_svc_class_weight_modes),
+                fallback_modes=[params.hybrid_svc_fallback_mode]
+                if params.hybrid_svc_fallback_mode is not None
+                else _parse_csv_list(params.hybrid_svc_fallback_modes),
+                fallback_min_score_values=[params.hybrid_svc_fallback_min_score]
+                if params.hybrid_svc_fallback_min_score is not None
+                else _parse_float_csv(params.hybrid_svc_fallback_min_score_values),
                 top_k_values=[params.hybrid_svc_top_k_fallback]
                 if params.hybrid_svc_top_k_fallback is not None
                 else _parse_int_csv(params.hybrid_svc_top_k_fallback_values),
@@ -1198,6 +1362,12 @@ def _grid(
                 class_weight_modes=[params.hybrid_sgd_class_weight_mode]
                 if params.hybrid_sgd_class_weight_mode is not None
                 else _parse_csv_list(params.hybrid_sgd_class_weight_modes),
+                fallback_modes=[params.hybrid_sgd_fallback_mode]
+                if params.hybrid_sgd_fallback_mode is not None
+                else _parse_csv_list(params.hybrid_sgd_fallback_modes),
+                fallback_min_score_values=[params.hybrid_sgd_fallback_min_score]
+                if params.hybrid_sgd_fallback_min_score is not None
+                else _parse_float_csv(params.hybrid_sgd_fallback_min_score_values),
                 top_k_values=[params.hybrid_sgd_top_k_fallback]
                 if params.hybrid_sgd_top_k_fallback is not None
                 else _parse_int_csv(params.hybrid_sgd_top_k_fallback_values),
@@ -1246,6 +1416,17 @@ def _validate_args(args: argparse.Namespace) -> None:
         modes = [single_mode] if single_mode is not None else _parse_csv_list(values_text)
         if any(mode not in {"none", "balanced"} for mode in modes):
             raise SystemExit(f"{label.upper()} class-weight modes must be drawn from: none, balanced")
+    for label, single_mode, values_text in (
+        ("ovr-logistic", args.ovr_fallback_mode, args.ovr_fallback_modes),
+        ("ovr-svc", args.ovr_svc_fallback_mode, args.ovr_svc_fallback_modes),
+        ("ovr-sgd", args.ovr_sgd_fallback_mode, args.ovr_sgd_fallback_modes),
+        ("hybrid-logistic", args.hybrid_logistic_fallback_mode, args.hybrid_logistic_fallback_modes),
+        ("hybrid-svc", args.hybrid_svc_fallback_mode, args.hybrid_svc_fallback_modes),
+        ("hybrid-sgd", args.hybrid_sgd_fallback_mode, args.hybrid_sgd_fallback_modes),
+    ):
+        modes = [single_mode] if single_mode is not None else _parse_csv_list(values_text)
+        if any(mode not in FALLBACK_MODE_CHOICES for mode in modes):
+            raise SystemExit(f"{label.upper()} fallback modes must be drawn from: {', '.join(FALLBACK_MODE_CHOICES)}")
     for label, single_value, values_text in (
         ("ovr-logistic", args.ovr_logistic_char_ngram_max, args.ovr_logistic_char_ngram_max_values),
         ("ovr-svc", args.ovr_svc_char_ngram_max, args.ovr_svc_char_ngram_max_values),
@@ -1257,6 +1438,17 @@ def _validate_args(args: argparse.Namespace) -> None:
         values = [single_value] if single_value is not None else _parse_int_csv(values_text)
         if any(value not in {0} and value < 3 for value in values):
             raise SystemExit(f"All --{label}-char-ngram-max-values entries must be 0 or at least 3")
+    for label, single_value, values_text in (
+        ("ovr-logistic", args.ovr_fallback_min_score, args.ovr_fallback_min_score_values),
+        ("ovr-svc", args.ovr_svc_fallback_min_score, args.ovr_svc_fallback_min_score_values),
+        ("ovr-sgd", args.ovr_sgd_fallback_min_score, args.ovr_sgd_fallback_min_score_values),
+        ("hybrid-logistic", args.hybrid_logistic_fallback_min_score, args.hybrid_logistic_fallback_min_score_values),
+        ("hybrid-svc", args.hybrid_svc_fallback_min_score, args.hybrid_svc_fallback_min_score_values),
+        ("hybrid-sgd", args.hybrid_sgd_fallback_min_score, args.hybrid_sgd_fallback_min_score_values),
+    ):
+        values = [single_value] if single_value is not None else _parse_float_csv(values_text)
+        if any(not pd.notna(value) for value in values):
+            raise SystemExit(f"Invalid fallback min score provided for {label}")
     for label, single_loss, values_text in (
         ("ovr-sgd", args.ovr_sgd_loss, args.ovr_sgd_losses),
         ("hybrid-sgd", args.hybrid_sgd_loss, args.hybrid_sgd_losses),
@@ -1357,8 +1549,11 @@ def _print_top_rows(
             f"ngram_max={int(row['ngram_max'])}, "
             f"char_ngram_max={int(row['char_ngram_max'])}, "
             f"class_weight_mode={row['class_weight_mode']}, "
+            f"fallback_mode={row['fallback_mode']}, "
             f"top_k_fallback={int(row['top_k_fallback'])}"
         )
+        if row["fallback_mode"] == FALLBACK_MODE_MAX_SCORE_TOP_1:
+            base += f", fallback_min_score={float(row['fallback_min_score']):g}"
         if row["model_family"] == "sgd":
             base += f", sgd_loss={row['sgd_loss']}, sgd_alpha={float(row['sgd_alpha']):g}"
         else:
@@ -1392,6 +1587,9 @@ def _print_best_params(
     else:
         print(f" - model_c: {float(best['model_c']):g}")
     print(f" - class_weight_mode: {best['class_weight_mode']}")
+    print(f" - fallback_mode: {best['fallback_mode']}")
+    if best["fallback_mode"] == FALLBACK_MODE_MAX_SCORE_TOP_1:
+        print(f" - fallback_min_score: {float(best['fallback_min_score']):g}")
     print(f" - top_k_fallback: {int(best['top_k_fallback'])}")
     if include_hybrid:
         print(f" - hybrid_rule: {args.hybrid_rule}")
@@ -1442,6 +1640,8 @@ def _get_cached_ovr_artifacts(
         params.sgd_loss,
         params.sgd_alpha,
         params.class_weight_mode,
+        params.fallback_mode,
+        params.fallback_min_score,
         tuple(params.fields),
         int(args.n_jobs),
     )
@@ -1463,6 +1663,8 @@ def _get_cached_ovr_artifacts(
             class_weight_mode=params.class_weight_mode,
             sgd_loss=params.sgd_loss or None,
             sgd_alpha=None if params.sgd_alpha < 0 else params.sgd_alpha,
+            fallback_mode="none",
+            fallback_min_score=0.0,
         )
         true_codes_by_org = seed_eval_df.set_index("org_id")["true_codes"].copy()
         true_codes_by_org.index = true_codes_by_org.index.astype(str)
@@ -1511,8 +1713,11 @@ def _run_grid_for_states(
                     f"clean_text={'on' if gp.clean_text else 'off'}, threshold={gp.threshold:.3f}, "
                     f"model_family={gp.model_family}, "
                     f"ngram_max={gp.ngram_max}, char_ngram_max={gp.char_ngram_max}, "
-                    f"class_weight_mode={gp.class_weight_mode}, top_k_fallback={gp.top_k_fallback}"
+                    f"class_weight_mode={gp.class_weight_mode}, "
+                    f"fallback_mode={gp.fallback_mode}, top_k_fallback={gp.top_k_fallback}"
                 )
+                if gp.fallback_mode == FALLBACK_MODE_MAX_SCORE_TOP_1:
+                    base += f", fallback_min_score={gp.fallback_min_score:g}"
                 if gp.model_family == "sgd":
                     base += f", sgd_loss={gp.sgd_loss}, sgd_alpha={gp.sgd_alpha:g}"
                 else:
@@ -1653,6 +1858,8 @@ def _print_results(
                 "sgd_loss",
                 "sgd_alpha",
                 "class_weight_mode",
+                "fallback_mode",
+                "fallback_min_score",
                 "top_k_fallback",
             ) if not approach.startswith("hybrid") else None,
         )

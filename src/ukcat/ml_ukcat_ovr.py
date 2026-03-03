@@ -38,6 +38,10 @@ MODEL_FAMILY_LINEAR_SVC = "linear_svc"
 MODEL_FAMILY_SGD = "sgd"
 SGD_LOSS_CHOICES = ["log_loss", "modified_huber"]
 MODEL_FAMILY_CHOICES = [MODEL_FAMILY_LOGISTIC, MODEL_FAMILY_LINEAR_SVC, MODEL_FAMILY_SGD]
+FALLBACK_MODE_NONE = "none"
+FALLBACK_MODE_TOP_K = "top_k"
+FALLBACK_MODE_MAX_SCORE_TOP_1 = "max_score_top_1"
+FALLBACK_MODE_CHOICES = [FALLBACK_MODE_NONE, FALLBACK_MODE_TOP_K, FALLBACK_MODE_MAX_SCORE_TOP_1]
 
 
 def _resolve_class_weight(class_weight_mode: str) -> str | None:
@@ -181,6 +185,8 @@ def _train_ukcat_ovr_artifact(
     class_weight_mode: str,
     sgd_loss: str | None,
     sgd_alpha: float | None,
+    fallback_mode: str,
+    fallback_min_score: float,
     threshold: float,
     top_k_fallback: int,
     model_type: str = "ukcat_ovr",
@@ -205,6 +211,8 @@ def _train_ukcat_ovr_artifact(
             raise click.ClickException(f"--sgd-loss must be one of: {', '.join(SGD_LOSS_CHOICES)}")
         if sgd_alpha is None or sgd_alpha <= 0:
             raise click.ClickException("--sgd-alpha must be greater than 0 for SGD models")
+    if fallback_mode not in FALLBACK_MODE_CHOICES:
+        raise click.ClickException(f"--fallback-mode must be one of: {', '.join(FALLBACK_MODE_CHOICES)}")
 
     df = _load_labelled_ukcat(sample_files)
     click.echo(f"Loaded labelled UKCAT data [{len(df):,} rows]")
@@ -229,6 +237,9 @@ def _train_ukcat_ovr_artifact(
     else:
         click.echo(f" - model_c: {model_c:g}")
     click.echo(f" - class_weight_mode: {class_weight_mode}")
+    click.echo(f" - fallback_mode: {fallback_mode}")
+    if fallback_mode == FALLBACK_MODE_MAX_SCORE_TOP_1:
+        click.echo(f" - fallback_min_score: {fallback_min_score:g}")
     click.echo(f" - threshold: {threshold:.3f}")
     click.echo(f" - top_k_fallback: {top_k_fallback}")
 
@@ -257,6 +268,8 @@ def _train_ukcat_ovr_artifact(
         "class_weight_mode": class_weight_mode,
         "sgd_loss": sgd_loss,
         "sgd_alpha": sgd_alpha,
+        "fallback_mode": fallback_mode,
+        "fallback_min_score": fallback_min_score,
         "min_df": 3,
         "threshold": threshold,
         "top_k_fallback": top_k_fallback,
@@ -278,7 +291,9 @@ def _predict_codes(
     mlb: MultiLabelBinarizer,
     x_test: Sequence[str],
     threshold: float,
+    fallback_mode: str = FALLBACK_MODE_TOP_K,
     top_k_fallback: int = 0,
+    fallback_min_score: float = 0.0,
 ) -> Tuple[List[List[str]], pd.DataFrame]:
     if hasattr(model, "predict_proba"):
         scores = model.predict_proba(x_test)
@@ -289,14 +304,26 @@ def _predict_codes(
     prob_df = pd.DataFrame(scores, columns=mlb.classes_)
     # Apply one shared cut-off across labels; this is easy to tune from the CLI.
     pred_binary = (prob_df.values >= threshold).astype(int)
-    if top_k_fallback > 0 and pred_binary.shape[1] > 0:
-        # If a row gets no labels at the threshold, back-fill with the top-k scores.
-        k = min(top_k_fallback, pred_binary.shape[1])
-        for i in range(pred_binary.shape[0]):
-            if pred_binary[i].sum() > 0:
-                continue
-            top_idx = prob_df.iloc[i].to_numpy().argsort()[-k:]
-            pred_binary[i, top_idx] = 1
+    if pred_binary.shape[1] > 0:
+        if fallback_mode == FALLBACK_MODE_TOP_K:
+            if top_k_fallback > 0:
+                # If a row gets no labels at the threshold, back-fill with the top-k scores.
+                k = min(top_k_fallback, pred_binary.shape[1])
+                for i in range(pred_binary.shape[0]):
+                    if pred_binary[i].sum() > 0:
+                        continue
+                    top_idx = prob_df.iloc[i].to_numpy().argsort()[-k:]
+                    pred_binary[i, top_idx] = 1
+        elif fallback_mode == FALLBACK_MODE_MAX_SCORE_TOP_1:
+            for i in range(pred_binary.shape[0]):
+                if pred_binary[i].sum() > 0:
+                    continue
+                row_scores = prob_df.iloc[i].to_numpy()
+                best_idx = int(row_scores.argmax())
+                if float(row_scores[best_idx]) >= fallback_min_score:
+                    pred_binary[i, best_idx] = 1
+        elif fallback_mode != FALLBACK_MODE_NONE:
+            raise ValueError(f"Unsupported fallback_mode: {fallback_mode}")
     pred_codes = mlb.inverse_transform(pred_binary)
     pred_codes = [sorted(set(map(str, codes))) for codes in pred_codes]
     return pred_codes, prob_df
@@ -353,6 +380,8 @@ def create_ukcat_ovr_model(
             if model_config.get("sgd_alpha") is not None
             else None
         ),
+        fallback_mode=str(model_config.get("fallback_mode", FALLBACK_MODE_TOP_K)),
+        fallback_min_score=float(model_config.get("fallback_min_score", 0.0)),
         threshold=float(model_config["threshold"]),
         top_k_fallback=int(model_config["top_k_fallback"]),
         model_type="ukcat_ovr",
@@ -405,6 +434,20 @@ def create_ukcat_ovr_model(
     type=int,
     show_default=True,
     help="If no labels pass threshold, assign the top-k labels by probability",
+)
+@click.option(
+    "--fallback-mode",
+    default=FALLBACK_MODE_TOP_K,
+    type=click.Choice(FALLBACK_MODE_CHOICES),
+    show_default=True,
+    help="Fallback strategy used when no labels pass threshold",
+)
+@click.option(
+    "--fallback-min-score",
+    default=0.0,
+    type=float,
+    show_default=True,
+    help="Minimum top score required by max_score_top_1 fallback",
 )
 @click.option(
     "--n-jobs",
@@ -476,6 +519,8 @@ def evaluate_ukcat_ovr(
     test_size: float,
     threshold: float,
     top_k_fallback: int,
+    fallback_mode: str,
+    fallback_min_score: float,
     n_jobs: int,
     clean_text: bool,
     ngram_max: int,
@@ -494,6 +539,8 @@ def evaluate_ukcat_ovr(
         raise click.ClickException("--test-size must be between 0 and 1")
     if top_k_fallback < 0:
         raise click.ClickException("--top-k-fallback must be 0 or greater")
+    if fallback_mode not in FALLBACK_MODE_CHOICES:
+        raise click.ClickException(f"--fallback-mode must be one of: {', '.join(FALLBACK_MODE_CHOICES)}")
     if ngram_max < 1:
         raise click.ClickException("--ngram-max must be at least 1")
     if char_ngram_max not in {0} and char_ngram_max < 3:
@@ -530,6 +577,9 @@ def evaluate_ukcat_ovr(
     click.echo(f" - test rows: {len(x_test):,}")
     click.echo(f" - threshold: {threshold:.2f}")
     click.echo(f" - top-k fallback: {top_k_fallback}")
+    click.echo(f" - fallback_mode: {fallback_mode}")
+    if fallback_mode == FALLBACK_MODE_MAX_SCORE_TOP_1:
+        click.echo(f" - fallback_min_score: {fallback_min_score:g}")
     click.echo(f" - n_jobs (OvR): {n_jobs}")
     click.echo(f" - n-grams: 1..{ngram_max} (min_df=3)")
     click.echo(
@@ -558,7 +608,15 @@ def evaluate_ukcat_ovr(
     )
     model.fit(x_train, y_train)
 
-    y_pred_codes, _ = _predict_codes(model, mlb, x_test, threshold=threshold, top_k_fallback=top_k_fallback)
+    y_pred_codes, _ = _predict_codes(
+        model,
+        mlb,
+        x_test,
+        threshold=threshold,
+        fallback_mode=fallback_mode,
+        top_k_fallback=top_k_fallback,
+        fallback_min_score=fallback_min_score,
+    )
 
     eval_df = pd.DataFrame(
         {
